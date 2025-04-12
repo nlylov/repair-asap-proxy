@@ -18,13 +18,11 @@ module.exports = async (req, res) => {
 
   try {
     const { message, conversationId } = req.body;
-
     let threadId = conversationId;
     if (!threadId) {
       const thread = await openai.beta.threads.create();
       threadId = thread.id;
     }
-
     await openai.beta.threads.messages.create(threadId, {
       role: 'user',
       content: message,
@@ -35,27 +33,20 @@ module.exports = async (req, res) => {
     });
 
     let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-
     while (runStatus.status !== 'completed') {
-      await new Promise((resolve) => setTimeout(resolve, 1000));
+      await new Promise(resolve => setTimeout(resolve, 1000));
       runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-
       if (runStatus.status === 'failed') {
-        throw new Error('Run failed');
+        throw new Error('Failed to process message');
       }
     }
 
     const messages = await openai.beta.threads.messages.list(threadId);
-    const assistantResponse = messages.data.find(
-      (msg) => msg.role === 'assistant' && msg.run_id === run.id
-    );
+    const assistantResponse = messages.data.find(msg => msg.role === 'assistant' && msg.run_id === run.id);
 
-    res.json({
-      response: assistantResponse.content[0].text.value,
-      conversationId: threadId,
-    });
+    res.json({ response: assistantResponse.content[0].text.value, conversationId: threadId });
   } catch (error) {
-    console.error('Ошибка:', error);
-    res.status(500).json({ error: 'Произошла ошибка при обработке запроса' });
+    console.error(error);
+    res.status(500).json({ error: 'Internal Server Error' });
   }
 };
