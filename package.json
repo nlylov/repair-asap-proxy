@@ -2,5 +2,7 @@
 {
   "name": "repair-asap-proxy",
   "version": "1.0.0",
-  "main": "api/chat.js"
+  "dependencies": {
+    "openai": "^4.0.0"
+  }
 }
