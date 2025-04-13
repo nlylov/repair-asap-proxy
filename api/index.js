@@ -7,6 +7,17 @@ const path = require('path');
 // Initialize Express app
 const app = express();
 
+// Check environment variables
+if (!process.env.OPENAI_API_KEY) {
+  console.error('OPENAI_API_KEY is not set');
+  process.exit(1);
+}
+
+if (!process.env.OPENAI_ASSISTANT_ID) {
+  console.error('OPENAI_ASSISTANT_ID is not set');
+  process.exit(1);
+}
+
 // Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
@@ -22,9 +33,7 @@ const allowedOrigins = [
 
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps, curl, etc.)
     if (!origin) return callback(null, true);
-    
     if (allowedOrigins.indexOf(origin) !== -1) {
       return callback(null, true);
     } else {
@@ -92,45 +101,35 @@ app.post('/api/message', async (req, res) => {
     
     // Run the assistant
     const run = await openai.beta.threads.runs.create(threadId, {
-      assistant_id: process.env.OPENAI_ASSISTANT_ID || 'asst_oMI1gmdS9GXwWOmnvglS1DFm'
+      assistant_id: process.env.OPENAI_ASSISTANT_ID
     });
     
     // Poll for completion
     let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
     
-    // Wait for completion (with timeout)
     const startTime = Date.now();
-    const timeoutMs = 30000; // 30 seconds timeout
+    const timeoutMs = 30000;
     
     while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
-      // Check for timeout
       if (Date.now() - startTime > timeoutMs) {
         return res.status(504).json({ error: 'Request timed out' });
       }
-      
-      // Wait a bit before polling again
       await new Promise(resolve => setTimeout(resolve, 1000));
       runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
     }
     
-    // Check if run completed successfully
     if (runStatus.status !== 'completed') {
       return res.status(500).json({ error: `Run failed with status: ${runStatus.status}` });
     }
     
-    // Get messages (newest first)
     const messages = await openai.beta.threads.messages.list(threadId);
-    
-    // Find the most recent assistant message
     const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
     
     if (!assistantMessage) {
       return res.status(404).json({ error: 'No response found' });
     }
     
-    // Extract the text content
     const messageContent = assistantMessage.content[0].text.value;
-    
     res.json({ message: messageContent });
   } catch (error) {
     console.error('Error processing message:', error);
@@ -143,5 +142,4 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok' });
 });
 
-// Export for Vercel serverless functions
 module.exports = app;
