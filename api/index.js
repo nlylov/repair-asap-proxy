@@ -26,7 +26,10 @@ app.use('/v1', createProxyMiddleware({
 app.get('/', (req, res) => {
   res.send('Прокси-сервер работает!');
 });
-
+// Добавьте после других маршрутов
+app.get('/chat.js', (req, res) => {
+  res.sendFile(path.join(__dirname, '..', 'chat.js'));
+});
 // Эндпоинт для проверки переменных окружения (без раскрытия ключей)
 app.get('/check-env', (req, res) => {
   res.json({
