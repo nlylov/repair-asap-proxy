@@ -7,7 +7,6 @@
   // Configuration
   const config = {
     apiEndpoint: 'https://api.asap.repair',
-    assistantId: 'asst_oMI1gmdS9GXwWOmnvglS1DFm',
     primaryColor: '#0066CC',
     fontFamily: 'Montserrat, sans-serif',
   };
@@ -300,7 +299,6 @@
     
     if (state.isOpen) {
       chatWindow.classList.add('open');
-      // Focus input when opening
       setTimeout(() => {
         document.getElementById('repair-asap-chat-input').focus();
       }, 300);
@@ -312,6 +310,17 @@
   // Initialize OpenAI thread
   async function initThread() {
     try {
+      // Check API health
+      const healthResponse = await fetch(`${config.apiEndpoint}/api/health`);
+      if (!healthResponse.ok) throw new Error('API is not available');
+      
+      // Fetch assistant ID from server
+      const configResponse = await fetch(`${config.apiEndpoint}/api/config`);
+      if (!configResponse.ok) throw new Error('Failed to fetch config');
+      const configData = await configResponse.json();
+      config.assistantId = configData.assistantId;
+
+      // Create thread
       const response = await fetch(`${config.apiEndpoint}/api/thread`, {
         method: 'POST',
         headers: {
@@ -434,7 +443,6 @@
     messagesContainer.appendChild(errorElement);
     messagesContainer.scrollTop = messagesContainer.scrollHeight;
     
-    // Remove after 5 seconds
     setTimeout(() => {
       errorElement.remove();
     }, 5000);
