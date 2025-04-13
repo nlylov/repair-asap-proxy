@@ -55,7 +55,7 @@ app.get('/chat.js', (req, res) => {
 
 // Специально для файла test.js
 app.get('/test.js', (req, res) => {
-  const filePath = path.join(__dirname, '..', 'test.js');
+  const filePath = path.join(__dirname, '..', 'public', 'test.js');
   if (fs.existsSync(filePath)) {
     res.setHeader('Content-Type', 'application/javascript');
     res.sendFile(filePath);
