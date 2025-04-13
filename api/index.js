@@ -1,4 +1,5 @@
 // api/index.js
+const path = require('path');
 const express = require('express');
 const cors = require('cors');
 const { createProxyMiddleware } = require('http-proxy-middleware');
@@ -11,7 +12,7 @@ app.use(cors({
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-
+app.use(express.static(path.join(__dirname, '..')));
 // OpenAI прокси
 app.use('/v1', createProxyMiddleware({
   target: 'https://api.openai.com',
