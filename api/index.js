@@ -7,7 +7,7 @@ const app = express();
 
 // Настройка CORS для вашего домена
 app.use(cors({
-  origin: ['https://asap.repair', 'https://www.asap.repair', 'http://localhost:3000'],
+  origin: ['https://asap.repair', 'https://www.asap.repair', 'https://api.asap.repair', 'http://localhost:3000'],
   methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
