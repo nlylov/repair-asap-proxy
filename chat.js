@@ -1,222 +1,90 @@
 /**
- * Repair ASAP Chatbot для Tilda
- * Версия для прямой интеграции на сайт Tilda
+ * Repair ASAP LLC Chatbot Implementation
+ * This script creates and manages the chatbot UI and API communication.
  */
 
-// Ждем полной загрузки страницы
-document.addEventListener('DOMContentLoaded', function() {
-  // Создаем контейнер для чат-бота, если его еще нет
-  if (!document.getElementById('repair-asap-chatbot')) {
-    const chatbotContainer = document.createElement('div');
-    chatbotContainer.id = 'repair-asap-chatbot';
-    document.body.appendChild(chatbotContainer);
-  }
-  
-  // Инициализируем чат-бот
-  initRepairASAPChatbot();
-});
-
-function initRepairASAPChatbot() {
-  // Настройки чат-бота
+(function() {
+  // Configuration
   const config = {
-    proxyUrl: 'https://api.asap.repair',
-    containerSelector: '#repair-asap-chatbot',
-    primaryColor: '#0066CC'
+    apiEndpoint: 'https://api.asap.repair',
+    assistantId: 'asst_oMI1gmdS9GXwWOmnvglS1DFm',
+    primaryColor: '#0066CC',
+    fontFamily: 'Montserrat, sans-serif',
   };
   
-  let threadId = null;
-  let isInitialized = false;
-  let messageQueue = [];
-  let envData = null;
+  // Main container ID
+  const containerId = 'repair-asap-chatbot';
   
-  // Создаем UI чат-бота
-  createChatUI();
+  // Store conversation state
+  let state = {
+    threadId: null,
+    messages: [],
+    isOpen: false,
+    isLoading: false,
+    hasError: false,
+  };
   
-  // Инициализируем соединение с API
-  init();
-  
-  async function init() {
-    try {
-      // Проверка настроек сервера
-      const envCheck = await fetch(`${config.proxyUrl}/check-env`);
-      envData = await envCheck.json();
-      
-      if (!envData.assistantId || !envData.apiKey) {
-        console.error('Ошибка: Переменные окружения на сервере не настроены');
-        return;
-      }
-      
-      // Создание нового потока (thread)
-      const threadResponse = await fetch(`${config.proxyUrl}/v1/threads`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      
-      if (!threadResponse.ok) {
-        throw new Error('Не удалось создать поток для чата');
-      }
-      
-      const threadData = await threadResponse.json();
-      threadId = threadData.id;
-      isInitialized = true;
-      
-      // Обработка сообщений, которые были в очереди
-      if (messageQueue.length > 0) {
-        for (const message of messageQueue) {
-          await sendMessage(message);
-        }
-        messageQueue = [];
-      }
-      
-      console.log('Чат-бот успешно инициализирован');
-    } catch (error) {
-      console.error('Ошибка инициализации чат-бота:', error);
-    }
-  }
-  
-  async function sendMessage(message) {
-    if (!isInitialized) {
-      // Если чат-бот еще не инициализирован, добавляем сообщение в очередь
-      messageQueue.push(message);
-      return { status: 'queued', message: 'Сообщение в очереди' };
-    }
-    
-    try {
-      // Добавление сообщения в поток
-      const messageResponse = await fetch(`${config.proxyUrl}/v1/threads/${threadId}/messages`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          role: 'user',
-          content: message
-        })
-      });
-      
-      if (!messageResponse.ok) {
-        throw new Error('Не удалось отправить сообщение');
-      }
-      
-      // Запуск ассистента
-      const runResponse = await fetch(`${config.proxyUrl}/v1/threads/${threadId}/runs`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          assistant_id: envData.assistantId
-        })
-      });
-      
-      if (!runResponse.ok) {
-        throw new Error('Не удалось запустить ассистента');
-      }
-      
-      const runData = await runResponse.json();
-      
-      // Ожидание завершения выполнения
-      return await waitForCompletion(runData.id);
-    } catch (error) {
-      console.error('Ошибка отправки сообщения:', error);
-      return { error: 'Не удалось получить ответ от чат-бота' };
-    }
-  }
-  
-  async function waitForCompletion(runId) {
-    let status = 'in_progress';
-    
-    while (status === 'in_progress' || status === 'queued') {
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      const response = await fetch(`${config.proxyUrl}/v1/threads/${threadId}/runs/${runId}`, {
-        method: 'GET',
-        headers: { 'Content-Type': 'application/json' }
-      });
-      
-      if (!response.ok) {
-        throw new Error('Не удалось получить статус выполнения');
-      }
-      
-      const data = await response.json();
-      status = data.status;
-      
-      if (status === 'completed') {
-        return await getMessages();
-      }
-      
-      if (status === 'failed' || status === 'cancelled') {
-        return { error: `Выполнение ${status}` };
-      }
-    }
-  }
-  
-  async function getMessages() {
-    const response = await fetch(`${config.proxyUrl}/v1/threads/${threadId}/messages`, {
-      method: 'GET',
-      headers: { 'Content-Type': 'application/json' }
-    });
-    
-    if (!response.ok) {
-      throw new Error('Не удалось получить сообщения');
-    }
-    
-    const data = await response.json();
-    // Возвращаем последнее сообщение от ассистента
-    const assistantMessages = data.data.filter(msg => msg.role === 'assistant');
-    
-    if (assistantMessages.length === 0) {
-      return { error: 'Нет ответа от ассистента' };
-    }
-    
-    return {
-      content: assistantMessages[0].content[0].text.value,
-      messageId: assistantMessages[0].id
-    };
-  }
-  
-  // Создание UI чат-бота
-  function createChatUI() {
-    const container = document.querySelector(config.containerSelector);
-    if (!container) {
-      console.error(`Контейнер ${config.containerSelector} не найден`);
-      return;
-    }
-    
-    // Создание HTML для чат-бота
-    container.innerHTML = `
-      <div class="chatbot-widget" style="display: none;">
-        <div class="chatbot-header" style="background-color: ${config.primaryColor};">
-          <h3>Repair ASAP Ассистент</h3>
-          <button class="chatbot-close">×</button>
-        </div>
-        <div class="chatbot-messages"></div>
-        <div class="chatbot-input">
-          <input type="text" placeholder="Введите ваш вопрос...">
-          <button style="background-color: ${config.primaryColor};">Отправить</button>
-        </div>
-      </div>
-      <button class="chatbot-toggle" style="background-color: ${config.primaryColor};">
-        <span>💬</span>
-      </button>
-    `;
-    
-    // Добавление стилей
+  // Create and inject CSS
+  function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
-      .chatbot-widget {
+      #repair-asap-chatbot-container {
         position: fixed;
-        bottom: 80px;
+        bottom: 20px;
         right: 20px;
-        width: 350px;
-        height: 500px;
-        background: #fff;
-        border-radius: 10px;
-        box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2);
-        display: flex;
-        flex-direction: column;
-        font-family: 'Montserrat', sans-serif;
         z-index: 9999;
-        overflow: hidden;
+        font-family: ${config.fontFamily};
       }
       
-      .chatbot-header {
+      #repair-asap-chat-button {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        background-color: ${config.primaryColor};
+        color: white;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        transition: all 0.3s ease;
+      }
+      
+      #repair-asap-chat-button:hover {
+        transform: scale(1.05);
+      }
+      
+      #repair-asap-chat-button svg {
+        width: 30px;
+        height: 30px;
+      }
+      
+      #repair-asap-chat-window {
+        position: absolute;
+        bottom: 70px;
+        right: 0;
+        width: 350px;
+        height: 500px;
+        background-color: white;
+        border-radius: 10px;
+        box-shadow: 0 5px 15px rgba(0, 0, 0, 0.2);
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+        transition: all 0.3s ease;
+        opacity: 0;
+        transform: translateY(20px);
+        pointer-events: none;
+      }
+      
+      #repair-asap-chat-window.open {
+        opacity: 1;
+        transform: translateY(0);
+        pointer-events: all;
+      }
+      
+      #repair-asap-chat-header {
+        background-color: ${config.primaryColor};
         color: white;
         padding: 15px;
         display: flex;
@@ -224,166 +92,364 @@ function initRepairASAPChatbot() {
         align-items: center;
       }
       
-      .chatbot-header h3 {
+      #repair-asap-chat-header h3 {
         margin: 0;
         font-size: 16px;
       }
       
-      .chatbot-close {
+      #repair-asap-chat-close {
+        cursor: pointer;
         background: none;
         border: none;
         color: white;
         font-size: 20px;
-        cursor: pointer;
       }
       
-      .chatbot-messages {
+      #repair-asap-chat-messages {
         flex: 1;
         overflow-y: auto;
         padding: 15px;
         display: flex;
         flex-direction: column;
+        gap: 10px;
       }
       
-      .message {
+      .chat-message {
         max-width: 80%;
         padding: 10px 15px;
-        margin-bottom: 10px;
-        border-radius: 18px;
-        line-height: 1.4;
+        border-radius: 15px;
+        margin-bottom: 5px;
+        word-wrap: break-word;
       }
       
-      .message.user {
-        background: #e6f2ff;
+      .user-message {
+        background-color: #E9F5FF;
+        color: #333;
         align-self: flex-end;
         border-bottom-right-radius: 5px;
       }
       
-      .message.bot {
-        background: #f0f0f0;
+      .bot-message {
+        background-color: #F2F2F2;
+        color: #333;
         align-self: flex-start;
         border-bottom-left-radius: 5px;
       }
       
-      .chatbot-input {
+      #repair-asap-chat-input-container {
+        padding: 15px;
+        border-top: 1px solid #eee;
         display: flex;
-        padding: 10px;
-        border-top: 1px solid #e0e0e0;
+        gap: 10px;
       }
       
-      .chatbot-input input {
+      #repair-asap-chat-input {
         flex: 1;
-        padding: 10px;
-        border: 1px solid #e0e0e0;
+        padding: 10px 15px;
+        border: 1px solid #ddd;
         border-radius: 20px;
-        font-family: 'Montserrat', sans-serif;
+        outline: none;
+        font-family: ${config.fontFamily};
       }
       
-      .chatbot-input button {
+      #repair-asap-chat-input:focus {
+        border-color: ${config.primaryColor};
+      }
+      
+      #repair-asap-chat-send {
+        background-color: ${config.primaryColor};
         color: white;
         border: none;
-        padding: 10px 15px;
-        margin-left: 10px;
         border-radius: 20px;
+        padding: 10px 15px;
         cursor: pointer;
+        font-family: ${config.fontFamily};
       }
       
-      .chatbot-toggle {
-        position: fixed;
-        bottom: 20px;
-        right: 20px;
-        width: 50px;
-        height: 50px;
-        border-radius: 50%;
+      #repair-asap-chat-send:disabled {
+        background-color: #ccc;
+        cursor: not-allowed;
+      }
+      
+      .loading-indicator {
         display: flex;
         align-items: center;
-        justify-content: center;
-        color: white;
-        cursor: pointer;
-        border: none;
-        box-shadow: 0 3px 10px rgba(0, 0, 0, 0.2);
-        z-index: 9999;
+        padding: 10px 15px;
+        color: #666;
+        font-style: italic;
+      }
+      
+      .loading-dots {
+        display: flex;
+        margin-left: 5px;
+      }
+      
+      .loading-dots span {
+        width: 6px;
+        height: 6px;
+        margin: 0 2px;
+        background-color: #666;
+        border-radius: 50%;
+        animation: loading-dots 1.4s infinite ease-in-out both;
+      }
+      
+      .loading-dots span:nth-child(1) {
+        animation-delay: -0.32s;
+      }
+      
+      .loading-dots span:nth-child(2) {
+        animation-delay: -0.16s;
+      }
+      
+      @keyframes loading-dots {
+        0%, 80%, 100% { transform: scale(0); }
+        40% { transform: scale(1); }
+      }
+      
+      .error-message {
+        color: #e74c3c;
+        text-align: center;
+        padding: 10px;
+        margin: 10px;
+        border: 1px solid #e74c3c;
+        border-radius: 5px;
+        background-color: #fadbd8;
       }
     `;
-    
     document.head.appendChild(style);
-    
-    // Добавление обработчиков событий
-    const widget = container.querySelector('.chatbot-widget');
-    const toggle = container.querySelector('.chatbot-toggle');
-    const close = container.querySelector('.chatbot-close');
-    const input = container.querySelector('.chatbot-input input');
-    const sendButton = container.querySelector('.chatbot-input button');
-    const messages = container.querySelector('.chatbot-messages');
-    
-    // Переключение видимости чат-бота
-    toggle.addEventListener('click', () => {
-      widget.style.display = 'flex';
-      toggle.style.display = 'none';
-      
-      // Добавление приветственного сообщения, если чат пуст
-      if (messages.children.length === 0) {
-        addMessage('Здравствуйте! Я ассистент Repair ASAP. Чем могу помочь вам сегодня?', 'bot');
-      }
-    });
-    
-    close.addEventListener('click', () => {
-      widget.style.display = 'none';
-      toggle.style.display = 'flex';
-    });
-    
-    // Отправка сообщения
-    const handleSendMessage = async () => {
-      const messageText = input.value.trim();
-      if (!messageText) return;
-      
-      // Добавление сообщения пользователя в UI
-      addMessage(messageText, 'user');
-      input.value = '';
-      
-      // Индикатор набора текста
-      const typingIndicator = document.createElement('div');
-      typingIndicator.className = 'message bot typing';
-      typingIndicator.textContent = 'Печатает...';
-      messages.appendChild(typingIndicator);
-      messages.scrollTop = messages.scrollHeight;
-      
-      // Получение ответа от чат-бота
-      try {
-        const response = await sendMessage(messageText);
-        
-        // Удаление индикатора набора текста
-        messages.removeChild(typingIndicator);
-        
-        if (response.error) {
-          addMessage('Извините, произошла ошибка. Пожалуйста, попробуйте позже.', 'bot');
-        } else {
-          addMessage(response.content, 'bot');
-        }
-      } catch (error) {
-        messages.removeChild(typingIndicator);
-        addMessage('Извините, произошла ошибка. Пожалуйста, попробуйте позже.', 'bot');
-      }
-    };
-    
-    sendButton.addEventListener('click', handleSendMessage);
-    input.addEventListener('keypress', (e) => {
-      if (e.key === 'Enter') handleSendMessage();
-    });
   }
   
-  // Метод для добавления сообщения в UI
-  function addMessage(text, sender) {
-    const container = document.querySelector(config.containerSelector);
+  // Create chat UI
+  function createChatUI() {
+    const container = document.getElementById(containerId);
     if (!container) return;
     
-    const messages = container.querySelector('.chatbot-messages');
-    if (!messages) return;
+    const chatContainer = document.createElement('div');
+    chatContainer.id = 'repair-asap-chatbot-container';
     
-    const messageElement = document.createElement('div');
-    messageElement.className = `message ${sender}`;
-    messageElement.textContent = text;
-    messages.appendChild(messageElement);
-    messages.scrollTop = messages.scrollHeight;
+    // Chat button
+    const chatButton = document.createElement('div');
+    chatButton.id = 'repair-asap-chat-button';
+    chatButton.innerHTML = `
+      <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+        <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+      </svg>
+    `;
+    chatButton.addEventListener('click', toggleChat);
+    
+    // Chat window
+    const chatWindow = document.createElement('div');
+    chatWindow.id = 'repair-asap-chat-window';
+    
+    // Chat header
+    const chatHeader = document.createElement('div');
+    chatHeader.id = 'repair-asap-chat-header';
+    chatHeader.innerHTML = `
+      <h3>Repair ASAP Support</h3>
+      <button id="repair-asap-chat-close">×</button>
+    `;
+    
+    // Chat messages container
+    const chatMessages = document.createElement('div');
+    chatMessages.id = 'repair-asap-chat-messages';
+    
+    // Add welcome message
+    const welcomeMessage = document.createElement('div');
+    welcomeMessage.className = 'chat-message bot-message';
+    welcomeMessage.textContent = 'Hello! How can I help you with your repair needs today?';
+    chatMessages.appendChild(welcomeMessage);
+    
+    // Chat input container
+    const chatInputContainer = document.createElement('div');
+    chatInputContainer.id = 'repair-asap-chat-input-container';
+    
+    const chatInput = document.createElement('input');
+    chatInput.id = 'repair-asap-chat-input';
+    chatInput.type = 'text';
+    chatInput.placeholder = 'Type your message...';
+    chatInput.addEventListener('keypress', (e) => {
+      if (e.key === 'Enter') sendMessage();
+    });
+    
+    const chatSend = document.createElement('button');
+    chatSend.id = 'repair-asap-chat-send';
+    chatSend.textContent = 'Send';
+    chatSend.addEventListener('click', sendMessage);
+    
+    // Assemble UI
+    chatInputContainer.appendChild(chatInput);
+    chatInputContainer.appendChild(chatSend);
+    chatWindow.appendChild(chatHeader);
+    chatWindow.appendChild(chatMessages);
+    chatWindow.appendChild(chatInputContainer);
+    chatContainer.appendChild(chatWindow);
+    chatContainer.appendChild(chatButton);
+    container.appendChild(chatContainer);
+    
+    // Add event listeners
+    document.getElementById('repair-asap-chat-close').addEventListener('click', toggleChat);
+    
+    // Initialize thread
+    initThread();
   }
-}
+  
+  // Toggle chat window
+  function toggleChat() {
+    const chatWindow = document.getElementById('repair-asap-chat-window');
+    state.isOpen = !state.isOpen;
+    
+    if (state.isOpen) {
+      chatWindow.classList.add('open');
+      // Focus input when opening
+      setTimeout(() => {
+        document.getElementById('repair-asap-chat-input').focus();
+      }, 300);
+    } else {
+      chatWindow.classList.remove('open');
+    }
+  }
+  
+  // Initialize OpenAI thread
+  async function initThread() {
+    try {
+      const response = await fetch(`${config.apiEndpoint}/api/thread`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        }
+      });
+      
+      if (!response.ok) throw new Error('Failed to create thread');
+      
+      const data = await response.json();
+      state.threadId = data.threadId;
+    } catch (error) {
+      console.error('Error initializing thread:', error);
+      showError('Failed to initialize chat. Please try again later.');
+    }
+  }
+  
+  // Send message to OpenAI API
+  async function sendMessage() {
+    const inputEl = document.getElementById('repair-asap-chat-input');
+    const message = inputEl.value.trim();
+    
+    if (!message || state.isLoading || !state.threadId) return;
+    
+    // Clear input
+    inputEl.value = '';
+    
+    // Add user message to UI
+    addMessageToUI('user', message);
+    
+    // Set loading state
+    state.isLoading = true;
+    showLoadingIndicator();
+    
+    try {
+      // Send message to API
+      const response = await fetch(`${config.apiEndpoint}/api/message`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          threadId: state.threadId,
+          message: message
+        })
+      });
+      
+      if (!response.ok) throw new Error('Failed to send message');
+      
+      const data = await response.json();
+      
+      // Remove loading indicator
+      removeLoadingIndicator();
+      
+      // Add bot response to UI
+      if (data.message) {
+        addMessageToUI('bot', data.message);
+      } else {
+        throw new Error('Invalid response from server');
+      }
+    } catch (error) {
+      console.error('Error sending message:', error);
+      removeLoadingIndicator();
+      showError('Failed to get a response. Please try again.');
+    } finally {
+      state.isLoading = false;
+    }
+  }
+  
+  // Add message to UI
+  function addMessageToUI(sender, text) {
+    const messagesContainer = document.getElementById('repair-asap-chat-messages');
+    const messageElement = document.createElement('div');
+    messageElement.className = `chat-message ${sender === 'user' ? 'user-message' : 'bot-message'}`;
+    messageElement.textContent = text;
+    
+    messagesContainer.appendChild(messageElement);
+    
+    // Scroll to bottom
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    
+    // Add to state
+    state.messages.push({ sender, text });
+  }
+  
+  // Show loading indicator
+  function showLoadingIndicator() {
+    const messagesContainer = document.getElementById('repair-asap-chat-messages');
+    const loadingElement = document.createElement('div');
+    loadingElement.className = 'loading-indicator';
+    loadingElement.id = 'loading-indicator';
+    loadingElement.innerHTML = `
+      Thinking
+      <div class="loading-dots">
+        <span></span>
+        <span></span>
+        <span></span>
+      </div>
+    `;
+    
+    messagesContainer.appendChild(loadingElement);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+  }
+  
+  // Remove loading indicator
+  function removeLoadingIndicator() {
+    const loadingElement = document.getElementById('loading-indicator');
+    if (loadingElement) {
+      loadingElement.remove();
+    }
+  }
+  
+  // Show error message
+  function showError(message) {
+    const messagesContainer = document.getElementById('repair-asap-chat-messages');
+    const errorElement = document.createElement('div');
+    errorElement.className = 'error-message';
+    errorElement.textContent = message;
+    
+    messagesContainer.appendChild(errorElement);
+    messagesContainer.scrollTop = messagesContainer.scrollHeight;
+    
+    // Remove after 5 seconds
+    setTimeout(() => {
+      errorElement.remove();
+    }, 5000);
+  }
+  
+  // Initialize when DOM is ready
+  function init() {
+    injectStyles();
+    createChatUI();
+  }
+  
+  // Check if document is already loaded
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
