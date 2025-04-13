@@ -4,16 +4,20 @@
     {
       "src": "api/index.js",
       "use": "@vercel/node"
+    },
+    {
+      "src": "public/**",
+      "use": "@vercel/static"
     }
   ],
   "routes": [
     {
       "src": "/chat.js",
-      "dest": "/public/chat.js"
-    },
-    {
-      "src": "/test.js",
-      "dest": "/public/test.js"
+      "dest": "/public/chat.js",
+      "headers": {
+        "Content-Type": "application/javascript",
+        "Cache-Control": "public, max-age=0, must-revalidate"
+      }
     },
     {
       "src": "/api/(.*)",
