@@ -12,23 +12,11 @@
   ],
   "routes": [
     {
-      "src": "/chat.js",
-      "dest": "/public/chat.js",
-      "headers": {
-        "Content-Type": "application/javascript",
-        "Cache-Control": "public, max-age=0, must-revalidate"
-      }
-    },
-    {
-      "src": "/test.js",
-      "dest": "/public/test.js",
-      "headers": {
-        "Content-Type": "application/javascript",
-        "Cache-Control": "public, max-age=0, must-revalidate"
-      }
-    },
-    {
       "src": "/api/(.*)",
+      "dest": "/api/index.js"
+    },
+    {
+      "src": "/(.*)",
       "dest": "/api/index.js"
     }
   ]
