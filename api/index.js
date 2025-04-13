@@ -108,7 +108,7 @@ app.post('/api/message', async (req, res) => {
     let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
     
     const startTime = Date.now();
-    const timeoutMs = 30000;
+    const timeoutMs = 30000; // 30 seconds timeout
     
     while (runStatus.status === 'in_progress' || runStatus.status === 'queued') {
       if (Date.now() - startTime > timeoutMs) {
@@ -139,7 +139,16 @@ app.post('/api/message', async (req, res) => {
 
 // Health check endpoint
 app.get('/api/health', (req, res) => {
+  if (!process.env.OPENAI_API_KEY || !process.env.OPENAI_ASSISTANT_ID) {
+    return res.status(500).json({ status: 'error', message: 'Server configuration incomplete' });
+  }
   res.json({ status: 'ok' });
 });
 
+// Config endpoint to provide assistant ID to client
+app.get('/api/config', (req, res) => {
+  res.json({ assistantId: process.env.OPENAI_ASSISTANT_ID });
+});
+
+// Export for Vercel serverless functions
 module.exports = app;
