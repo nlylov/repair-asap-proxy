@@ -39,9 +39,6 @@ app.use(cors({
 // Parse JSON requests
 app.use(express.json());
 
-// Для обслуживания статических файлов
-app.use(express.static(path.join(__dirname, '..')));
-
 // Специально для файла chat.js
 app.get('/chat.js', (req, res) => {
   const filePath = path.join(__dirname, '..', 'public', 'chat.js');
