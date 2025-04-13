@@ -39,16 +39,28 @@ app.use(cors({
 // Parse JSON requests
 app.use(express.json());
 
-// Serve chat.js as static file
+// Для обслуживания статических файлов
+app.use(express.static(path.join(__dirname, '..')));
+
+// Специально для файла chat.js
 app.get('/chat.js', (req, res) => {
   const filePath = path.join(__dirname, '..', 'chat.js');
-  
-  // Check if file exists
   if (fs.existsSync(filePath)) {
     res.setHeader('Content-Type', 'application/javascript');
-    fs.createReadStream(filePath).pipe(res);
+    res.sendFile(filePath);
   } else {
     res.status(404).send('Chat script not found');
+  }
+});
+
+// Специально для файла test.js
+app.get('/test.js', (req, res) => {
+  const filePath = path.join(__dirname, '..', 'test.js');
+  if (fs.existsSync(filePath)) {
+    res.setHeader('Content-Type', 'application/javascript');
+    res.sendFile(filePath);
+  } else {
+    res.status(404).send('Test script not found');
   }
 });
 
