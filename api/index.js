@@ -64,6 +64,9 @@ app.get('/test.js', (req, res) => {
   }
 });
 
+// Обслуживание статических файлов из директории public
+app.use(express.static(path.join(__dirname, '..', 'public')));
+
 // Create a new thread
 app.post('/api/thread', async (req, res) => {
   try {
