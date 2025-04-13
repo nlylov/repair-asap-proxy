@@ -44,7 +44,7 @@ app.use(express.static(path.join(__dirname, '..')));
 
 // Специально для файла chat.js
 app.get('/chat.js', (req, res) => {
-  const filePath = path.join(__dirname, '..', 'chat.js');
+  const filePath = path.join(__dirname, '..', 'public', 'chat.js');
   if (fs.existsSync(filePath)) {
     res.setHeader('Content-Type', 'application/javascript');
     res.sendFile(filePath);
