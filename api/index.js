@@ -1,51 +1,37 @@
 // api/index.js
 const express = require('express');
 const cors = require('cors');
-const bodyParser = require('body-parser');
+const { createProxyMiddleware } = require('http-proxy-middleware');
 
 const app = express();
 
-// Разрешаем парсинг JSON
-app.use(bodyParser.json());
+// Настройка CORS для вашего домена
+app.use(cors({
+  origin: ['https://asap.repair', 'https://www.asap.repair', 'http://localhost:3000'],
+  methods: ['GET', 'POST', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
+}));
 
-// Настраиваем CORS для всех запросов
-app.use((req, res, next) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  
-  // Обработка предварительных запросов OPTIONS
-  if (req.method === 'OPTIONS') {
-    return res.status(200).end();
+// OpenAI прокси
+app.use('/v1', createProxyMiddleware({
+  target: 'https://api.openai.com',
+  changeOrigin: true,
+  onProxyReq: (proxyReq, req, res) => {
+    proxyReq.setHeader('Authorization', `Bearer ${process.env.OPENAI_API_KEY}`);
   }
-  
-  next();
-});
+}));
 
-// Маршрут для чата
-app.post('/api/chat', (req, res) => {
-  console.log('Получен запрос:', req.body);
-  
-  // Получаем сообщение из тела запроса
-  const message = req.body.message || 'Привет';
-  const conversationId = req.body.conversationId || '';
-  
-  // Отправляем ответ
-  res.json({
-    response: "Это тестовый ответ от прокси-сервера. Ваше сообщение: " + message,
-    conversationId: conversationId || "new_conversation_123"
-  });
-});
-
-// Маршрут для проверки работы сервера
+// Простой эндпоинт для проверки работоспособности
 app.get('/', (req, res) => {
   res.send('Прокси-сервер работает!');
 });
 
-// Маршрут для проверки API
-app.get('/api/chat', (req, res) => {
-  res.json({ status: 'ok', message: 'API работает' });
+// Эндпоинт для проверки переменных окружения (без раскрытия ключей)
+app.get('/check-env', (req, res) => {
+  res.json({
+    assistantId: process.env.OPENAI_ASSISTANT_ID ? 'Настроен' : 'Не настроен',
+    apiKey: process.env.OPENAI_API_KEY ? 'Настроен' : 'Не настроен'
+  });
 });
 
-// Экспортируем приложение для Vercel
 module.exports = app;
