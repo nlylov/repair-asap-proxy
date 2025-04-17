@@ -3,11 +3,7 @@
 (function() {
   // --- Конфигурация ---
   const config = {
-    // Используем пустую строку для относительных запросов на том же домене
-    // Это будет работать и с локальным тестированием, и с Vercel деплоем
-    apiEndpoint: '', // Пустая строка для запросов к текущему домену
-    //apiEndpoint: 'http://localhost:3000', // Раскомментируй для локального теста
-    // apiEndpoint: 'https://api.asap.repair', // Раскомментируй для конкретного домена API
+    apiEndpoint: 'https://api.asap.repair',
     primaryColor: '#0066CC',
     fontFamily: 'Montserrat, sans-serif',
   };
