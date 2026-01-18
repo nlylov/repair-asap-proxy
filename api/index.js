@@ -92,6 +92,7 @@ app.post('/api/message', async (req, res) => {
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
             tools: [
+                { type: "file_search" },
                 {
                     type: "function",
                     function: {
