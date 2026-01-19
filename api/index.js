@@ -35,7 +35,7 @@ try {
 // --- НАЧАЛО: Блок Middleware ---
 app.use((req, res, next) => {
     // Используем существующий x-request-id или генерируем новый
-    req.id = req.headers['x-request-id'] || uuidv4(); 
+    req.id = req.headers['x-request-id'] || uuidv4();
     res.setHeader('X-Request-ID', req.id);
     // Логируем только если это не запрос от QStash к обработчику очереди (чтобы не дублировать)
     if (!req.originalUrl.includes('/api/process-sheet-queue')) {
@@ -89,8 +89,17 @@ app.post('/api/message', async (req, res) => {
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
         logInfo(req, context, 'User message added', { threadId });
 
+        // === ИЗМЕНЕНИЕ 1: Добавлены instructions и tool_resources ===
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
+            instructions: `
+WARRANTY RULE (MUST FOLLOW - TOP PRIORITY):
+- Labor / Workmanship warranty: 1 YEAR from the service date.
+- Parts / Materials warranty: 60 DAYS ONLY for parts/materials WE SUPPLY and install.
+- NEVER say "60 days" when asked about labor or workmanship warranty - it is ALWAYS 1 YEAR.
+- If asked about "warranty" in general, ALWAYS list BOTH warranties as two separate items.
+- The 60-day warranty applies ONLY to physical parts/materials, NEVER to labor.
+`,
             tools: [
                 { type: "file_search" },
                 {
@@ -113,13 +122,19 @@ app.post('/api/message', async (req, res) => {
                         }
                     }
                 }
-            ]
+            ],
+            tool_resources: {
+                file_search: {
+                    vector_store_ids: [process.env.OPENAI_VECTOR_STORE_ID]
+                }
+            }
         });
+        // === КОНЕЦ ИЗМЕНЕНИЯ 1 ===
         logInfo(req, context, 'Assistant run created', { threadId, runId: run.id });
 
         let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
         const startTime = Date.now();
-        const timeoutMs = 60000; 
+        const timeoutMs = 60000;
 
         while (['queued', 'in_progress', 'requires_action', 'cancelling'].includes(runStatus.status)) {
             logInfo(req, context, `Run status: ${runStatus.status}`, { runId: run.id });
@@ -213,7 +228,12 @@ app.post('/api/message', async (req, res) => {
            const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
            if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
                const originalMessageContent = assistantMessage.content[0].text.value;
-               const cleanedMessage = originalMessageContent.replace(/【.*?†source】/g, '').trim();
+               // === ИЗМЕНЕНИЕ 2: Добавлен второй regex для очистки цитат ===
+               const cleanedMessage = originalMessageContent
+                   .replace(/【.*?†source】/g, '')
+                   .replace(/\[\d+:\d+†[^\]]+\]/g, '')
+                   .trim();
+               // === КОНЕЦ ИЗМЕНЕНИЯ 2 ===
                logInfo(req, context, 'Original message length:', { len: originalMessageContent.length });
                logInfo(req, context, 'Cleaned message length:', { len: cleanedMessage.length });
                logInfo(req, context, 'Sending final cleaned assistant message to client', { runId: run.id });
@@ -265,16 +285,16 @@ app.post('/api/webhook/tilda', async (req, res) => { // Обработчик т�
         logError(req, context, 'QSTASH_TOKEN environment variable is not set! Cannot queue message.');
         // Отвечаем Tilda, что получили, но обработать не сможем
         // Используем статус 200, чтобы Tilda не повторяла запрос
-        return res.status(200).send('Webhook received (QStash config error)'); 
+        return res.status(200).send('Webhook received (QStash config error)');
     }
 
     try {
         // 2. Извлечение и минимальная валидация данных
         const tildaData = req.body;
         const timestamp = new Date().toISOString();
-        
+
         // Используем стандартные имена или имена из формы Tilda
-        const name = tildaData.Name || tildaData.name || ''; 
+        const name = tildaData.Name || tildaData.name || '';
         const rawPhone = tildaData.Phone || tildaData.phone || tildaData['Телефон'] || '';
         const phone = normalizePhone(rawPhone); // Нормализуем телефон
         const email = tildaData.Email || tildaData.email || ''; // Используем пустую строку по умолчанию, если не null
@@ -301,23 +321,23 @@ app.post('/api/webhook/tilda', async (req, res) => { // Обработчик т�
         const leadDataForQueue = {
             // reqId: req.id, // Можно передать ID исходного запроса для сквозного логирования
             timestamp: timestamp,
-            source: 'Tilda Form', 
+            source: 'Tilda Form',
             name: name,
-            phone: phone, 
+            phone: phone,
             email: email,
             address: address,
             service: service,
-            notes: notesContent.join('; ') 
+            notes: notesContent.join('; ')
         };
 
         // 3. Публикация задачи в QStash
         logInfo(req, context, 'Publishing lead data to QStash queue...', { dataSize: JSON.stringify(leadDataForQueue).length });
 
-        // Определяем URL обработчика очереди. 
+        // Определяем URL обработчика очереди.
         // Используем process.env.VERCEL_URL для надежности на Vercel
         // или req.headers['x-forwarded-host'] как запасной вариант
         const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `${req.protocol}://${req.get('host')}`;
-        const destinationUrl = `${baseUrl}/api/process-sheet-queue`; 
+        const destinationUrl = `${baseUrl}/api/process-sheet-queue`;
 
         logInfo(req, context, `Destination URL for QStash: ${destinationUrl}`);
 
@@ -330,7 +350,7 @@ app.post('/api/webhook/tilda', async (req, res) => { // Обработчик т�
       // Обновим и лог для ясности
       logInfo(req, context, 'Successfully published to QStash topic/destination "google-sheet-endpoint"', { messageId: publishResponse.messageId });
 
-        // 4. Отвечаем Tilda СРАЗУ 
+        // 4. Отвечаем Tilda СРАЗУ
         // (Ответ уже должен быть отправлен к этому моменту, если не было ошибок выше)
         if (!res.headersSent) {
              res.status(200).send('Webhook received, queued for processing');
