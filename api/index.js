@@ -80,10 +80,19 @@ app.post('/api/message', async (req, res) => {
         logInfo(req, context, 'User message added', { threadId });
 
         // Запускаем Ассистента
+        // ИЗМЕНЕНИЕ: Используем additional_instructions вместо instructions
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
-            // Передаем текущее время для контекста
-            instructions: `Current date and time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.`
+            additional_instructions: `
+Current date and time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
+
+IMPORTANT BOOKING RULES:
+1. You HAVE a tool named 'saveBookingToSheet'. Use it to save bookings.
+2. To use the tool, you MUST have the user's NAME and PHONE number.
+3. IF the user asks to book/schedule but is missing the phone number: DO NOT say "I cannot book". Instead, ASK for the phone number.
+4. Once you have Name and Phone, execute 'saveBookingToSheet' immediately.
+5. Never redirect the user to the website for booking if they are providing details in chat. You are the booking agent.
+`
         });
         
         logInfo(req, context, 'Run created', { runId: run.id });
