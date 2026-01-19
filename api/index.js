@@ -1,4 +1,4 @@
-// api/index.js (FINAL STABLE VERSION: Assistants API)
+// api/index.js (FINAL STABLE VERSION: Assistants API + Citation Fix)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -179,8 +179,9 @@ app.post('/api/message', async (req, res) => {
             
             if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
                 const text = assistantMessage.content[0].text.value
-                    .replace(/【.*?†source】/g, '')
-                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
+                    .replace(/【\d+:\d+†.*?】/g, '') // Удаляем цитаты вида 【6:1†file.txt】
+                    .replace(/【.*?†source】/g, '') // Удаляем старый формат цитат
+                    .replace(/\[\d+:\d+†[^\]]+\]/g, '') // Удаляем формат [4:0†file]
                     .trim();
 
                 res.json({ 
