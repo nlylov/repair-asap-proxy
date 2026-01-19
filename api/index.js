@@ -1,4 +1,4 @@
-// api/index.js (FINAL VERSION: Responses API Architecture)
+// api/index.js (FINAL STABLE VERSION: Assistants API)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -19,11 +19,12 @@ let openai;
 
 // Инициализация OpenAI
 try {
-    if (config.openai.apiKey) {
+    if (config.openai.apiKey && config.openai.assistantId) {
         openai = new OpenAI({ apiKey: config.openai.apiKey });
-        logger.info('OpenAI client initialized.');
+        logger.info('OpenAI client initialized successfully.');
     } else {
-        throw new Error('OpenAI API Key is missing.');
+        // Не ломаем сервер сразу, но логируем ошибку
+        logger.error('OpenAI credentials missing (API Key or Assistant ID)');
     }
 } catch (error) {
     logger.error('Failed to initialize OpenAI client', error);
@@ -45,143 +46,177 @@ app.use(express.static(path.join(__dirname, '..', 'public')));
 
 // --- РОУТЫ ---
 
-// 1. Создание треда (Оставляем для совместимости с фронтендом, но он будет фиктивным)
-app.post('/api/thread', (req, res) => {
-    // В новой архитектуре Responses API нам не нужен thread_id на сервере,
-    // но фронтенд его ждет, поэтому возвращаем заглушку.
-    res.json({ threadId: 'thread_stateless_' + uuidv4() });
+// 1. Создание треда
+app.post('/api/thread', async (req, res) => {
+    logInfo(req, '/api/thread', 'Create thread requested');
+    if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
+    try {
+      const thread = await openai.beta.threads.create();
+      logInfo(req, '/api/thread', 'Thread created successfully', { threadId: thread.id });
+      res.json({ threadId: thread.id });
+    } catch (error) {
+      logError(req, '/api/thread', 'Error creating thread', error);
+      res.status(500).json({ error: 'Failed to create thread' });
+    }
 });
 
-// 2. Обработка сообщений (Responses API)
+// 2. Обработка сообщений
 app.post('/api/message', async (req, res) => {
     const context = '/api/message';
     
-    if (!openai) return res.status(500).json({ error: 'OpenAI not configured' });
-    
-    const { message } = req.body; // threadId нам больше не важен для логики OpenAI
-    
-    if (!message) return res.status(400).json({ error: 'Message is required' });
+    if (!openai) {
+        logError(req, context, 'OpenAI not initialized');
+        return res.status(500).json({ error: 'Server configuration error' });
+    }
 
     try {
-        logInfo(req, context, 'Sending request to OpenAI Responses API...');
+        const { threadId, message } = req.body;
+        if (!threadId || !message) {
+            return res.status(400).json({ error: 'Thread ID and message required' });
+        }
 
-        // === ГЛАВНОЕ ИЗМЕНЕНИЕ: Responses API ===
-        const response = await openai.responses.create({
-            model: "gpt-4o-mini", // Используем актуальную модель
-            input: message,
-            tools: [
-                {
-                    type: "file_search",
-                    vector_store_ids: [process.env.OPENAI_VECTOR_STORE_ID], // ID хранилища из Vercel
-                    max_num_results: 3
-                },
-                {
-                    type: "function",
-                    function: {
-                        name: "saveBookingToSheet",
-                        description: "Save booking details (name, phone, etc) and confirm to user.",
-                        parameters: {
-                            type: "object",
-                            properties: {
-                                name: { type: "string" },
-                                phone: { type: "string" },
-                                email: { type: "string" },
-                                service: { type: "string" }
-                            },
-                            required: ["name", "phone"]
-                        }
-                    }
-                }
-            ]
+        // Добавляем сообщение пользователя
+        await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
+        logInfo(req, context, 'User message added', { threadId });
+
+        // Запускаем Ассистента
+        const run = await openai.beta.threads.runs.create(threadId, {
+            assistant_id: config.openai.assistantId,
+            // Передаем текущее время для контекста
+            instructions: `Current date and time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.`
         });
+        
+        logInfo(req, context, 'Run created', { runId: run.id });
 
-        // Обработка ответа
-        let responseText = response.output_text || "I processed your request.";
+        // Ждем ответа (Polling)
+        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        const startTime = Date.now();
+        const timeoutMs = 50000; 
+
+        // Переменная для хранения действия формы
         let formActionData = null;
 
-        // Проверяем, вызвал ли бот функцию (инструмент)
-        if (response.tool_calls && response.tool_calls.length > 0) {
-            for (const toolCall of response.tool_calls) {
-                if (toolCall.function.name === 'saveBookingToSheet') {
-                    logInfo(req, context, 'Function call detected: saveBookingToSheet');
-                    
-                    try {
-                        const args = JSON.parse(toolCall.function.arguments);
-                        
-                        // 1. Формируем команду для фронтенда (заполнить форму)
-                        formActionData = {
-                            type: 'FILL_FORM',
-                            payload: {
-                                name: args.name || '',
-                                phone: args.phone || '',
-                                email: args.email || '',
-                                service: args.service || ''
-                            }
-                        };
+        while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
+            // Проверка таймаута
+            if (Date.now() - startTime > timeoutMs) {
+                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch(e) {}
+                return res.status(504).json({ error: 'Timeout waiting for AI' });
+            }
 
-                        // 2. Сохраняем в таблицу
-                        const leadData = {
-                            reqId: req.id,
-                            timestamp: new Date().toISOString(),
-                            source: 'Chatbot (Responses API)',
-                            name: args.name,
-                            phone: normalizePhone(args.phone),
-                            email: args.email,
-                            service: args.service,
-                            notes: 'Auto-saved via Chat'
-                        };
-                        
-                        await appendLeadToSheet(req, leadData);
-                        
-                        // Если бот не дал текстового ответа, добавляем подтверждение
-                        if (!responseText || responseText === "I processed your request.") {
-                            responseText = "I've saved your details! Please check the form below.";
+            // Обработка вызова функций
+            if (runStatus.status === 'requires_action') {
+                const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
+                let toolOutputs = [];
+
+                await Promise.all(toolCalls.map(async (toolCall) => {
+                    if (toolCall.function.name === 'saveBookingToSheet') {
+                        try {
+                            const args = JSON.parse(toolCall.function.arguments);
+                            
+                            // Запоминаем данные для фронтенда
+                            formActionData = {
+                                type: 'FILL_FORM',
+                                payload: {
+                                    name: args.name || '',
+                                    phone: args.phone || '',
+                                    email: args.email || '',
+                                    service: args.service || ''
+                                }
+                            };
+
+                            // Сохраняем в Google Sheet
+                            const leadData = {
+                                reqId: req.id,
+                                timestamp: new Date().toISOString(),
+                                source: 'Chatbot',
+                                name: args.name,
+                                phone: normalizePhone(args.phone),
+                                email: args.email,
+                                service: args.service,
+                                notes: `Time: ${args.time_slot || 'N/A'}`
+                            };
+                            
+                            const sheetResult = await appendLeadToSheet(req, leadData);
+                            
+                            toolOutputs.push({
+                                tool_call_id: toolCall.id,
+                                output: JSON.stringify({ 
+                                    status: sheetResult.success ? 'OK' : 'Error', 
+                                    message: sheetResult.success ? 'Saved successfully.' : 'Failed to save.'
+                                })
+                            });
+
+                        } catch (err) {
+                            toolOutputs.push({
+                                tool_call_id: toolCall.id,
+                                output: JSON.stringify({ status: 'Error', message: err.message })
+                            });
                         }
-
-                    } catch (err) {
-                        logError(req, context, 'Error processing tool call', err);
+                    } else {
+                        // Неизвестная функция
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({ status: 'Error', message: 'Function not found' })
+                        });
                     }
+                }));
+
+                // Отправляем результаты функций обратно в OpenAI
+                if (toolOutputs.length > 0) {
+                    runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
                 }
             }
-        }
-        
-        // Очистка текста от ссылок на источники
-        const cleanedMessage = responseText
-            .replace(/【.*?†source】/g, '')
-            .replace(/\[\d+:\d+†[^\]]+\]/g, '')
-            .trim();
 
-        // Отправляем ответ + Action (если был)
-        res.json({ 
-            message: cleanedMessage,
-            action: formActionData 
-        });
+            // Пауза перед следующей проверкой
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        }
+
+        // Обработка завершения
+        if (runStatus.status === 'completed') {
+            const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
+            const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
+            
+            if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
+                const text = assistantMessage.content[0].text.value
+                    .replace(/【.*?†source】/g, '')
+                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
+                    .trim();
+
+                res.json({ 
+                    message: text,
+                    action: formActionData 
+                });
+            } else {
+                res.status(500).json({ error: 'No text response' });
+            }
+        } else {
+            res.status(500).json({ error: `Run failed: ${runStatus.status}` });
+        }
 
     } catch (error) {
-        logError(req, context, 'Error in Responses API', error);
-        res.status(500).json({ error: 'Failed to process message' });
+        logError(req, context, 'Fatal error', error);
+        res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
 // --- Health Check ---
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok', config_check: !!config.openai.apiKey }));
 
-// --- Webhook Tilda (Без изменений) ---
+// --- Webhook (Без изменений) ---
 app.post('/api/webhook/tilda', async (req, res) => {
-    // ... тот же код вебхука, что и был ...
-    // (для краткости не дублирую, так как он не меняется)
+    // ... тот же код вебхука ...
+    // Оставляем как есть для экономии места, он рабочий
     const context = '/api/webhook/tilda';
-    logInfo(req, context, 'Webhook received', req.body);
     let qstashClient;
-    if (process.env.QSTASH_TOKEN) {
-        qstashClient = new Client({ token: process.env.QSTASH_TOKEN });
-    } else {
-        return res.status(200).send('Received (Config Error)');
-    }
+    if (process.env.QSTASH_TOKEN) qstashClient = new Client({ token: process.env.QSTASH_TOKEN });
+    else return res.status(200).send('Received (Config Error)');
+
     try {
         const tildaData = req.body;
         const phone = normalizePhone(tildaData.Phone || tildaData.phone || '');
         if (!phone) return res.status(200).send('Received (Invalid Phone)');
+
         const leadDataForQueue = {
             timestamp: new Date().toISOString(),
             source: 'Tilda Form',
@@ -193,12 +228,9 @@ app.post('/api/webhook/tilda', async (req, res) => {
             notes: JSON.stringify(tildaData)
         };
         const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `${req.protocol}://${req.get('host')}`;
-        await qstashClient.publishJSON({
-            url: `${baseUrl}/api/process-sheet-queue`,
-            body: leadDataForQueue,
-        });
+        await qstashClient.publishJSON({ url: `${baseUrl}/api/process-sheet-queue`, body: leadDataForQueue });
         if (!res.headersSent) res.status(200).send('Queued');
-    } catch (error) {
+    } catch (e) {
         if (!res.headersSent) res.status(200).send('Received (Error)');
     }
 });
