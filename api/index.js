@@ -1,4 +1,4 @@
-// api/index.js (FINAL STABLE VERSION: Assistants API + Citation Fix)
+// api/index.js (CLEAN VERSION: No Tilda, Better Booking Flow)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -11,7 +11,7 @@ const config = require('../lib/config');
 const { appendLeadToSheet } = require('../lib/googleSheetService');
 const { logInfo, logError, logger, logWarn } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
-const { Client } = require("@upstash/qstash");
+// Удален импорт QStash, так как он был нужен только для Tilda
 // --- КОНЕЦ: Блок Импортов ---
 
 const app = express();
@@ -23,7 +23,6 @@ try {
         openai = new OpenAI({ apiKey: config.openai.apiKey });
         logger.info('OpenAI client initialized successfully.');
     } else {
-        // Не ломаем сервер сразу, но логируем ошибку
         logger.error('OpenAI credentials missing (API Key or Assistant ID)');
     }
 } catch (error) {
@@ -34,9 +33,7 @@ try {
 app.use((req, res, next) => {
     req.id = req.headers['x-request-id'] || uuidv4();
     res.setHeader('X-Request-ID', req.id);
-    if (!req.originalUrl.includes('/api/process-sheet-queue')) {
-       logInfo(req, `${req.method} ${req.originalUrl}`, { headers: req.headers });
-    }
+    logInfo(req, `${req.method} ${req.originalUrl}`, { headers: req.headers });
     next();
 });
 app.use(cors(config.cors.options));
@@ -80,7 +77,6 @@ app.post('/api/message', async (req, res) => {
         logInfo(req, context, 'User message added', { threadId });
 
         // Запускаем Ассистента
-        // ИЗМЕНЕНИЕ: Используем additional_instructions вместо instructions
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
             additional_instructions: `
@@ -91,9 +87,10 @@ IMPORTANT BOOKING RULES:
 2. To use the tool, you MUST have the user's NAME and PHONE number.
 3. IF the user asks to book/schedule but is missing the phone number: DO NOT say "I cannot book". Instead, ASK for the phone number.
 4. Once you have Name and Phone, execute 'saveBookingToSheet' immediately.
-5. Never redirect the user to the website for booking if they are providing details in chat. You are the booking agent.
-6. STRICTLY FORBIDDEN: Do NOT mention WhatsApp or suggest contacting via WhatsApp. Use ONLY the tool provided.
-7. After using the tool, simply confirm that the request has been received and the team will contact them.
+5. IF the user asks about price AND booking in the same message: Provide the price estimation FIRST, then confirm the booking.
+6. Never redirect the user to the website for booking if they are providing details in chat. You are the booking agent.
+7. STRICTLY FORBIDDEN: Do NOT mention WhatsApp or suggest contacting via WhatsApp. Use ONLY the tool provided.
+8. After using the tool successfully, confirm to the user that the request is received. Do not apologize or mention "system errors" if the tool output says "Saved successfully".
 `
         });
         
@@ -213,37 +210,5 @@ IMPORTANT BOOKING RULES:
 
 // --- Health Check ---
 app.get('/api/health', (req, res) => res.json({ status: 'ok', config_check: !!config.openai.apiKey }));
-
-// --- Webhook (Без изменений) ---
-app.post('/api/webhook/tilda', async (req, res) => {
-    // ... тот же код вебхука ...
-    // Оставляем как есть для экономии места, он рабочий
-    const context = '/api/webhook/tilda';
-    let qstashClient;
-    if (process.env.QSTASH_TOKEN) qstashClient = new Client({ token: process.env.QSTASH_TOKEN });
-    else return res.status(200).send('Received (Config Error)');
-
-    try {
-        const tildaData = req.body;
-        const phone = normalizePhone(tildaData.Phone || tildaData.phone || '');
-        if (!phone) return res.status(200).send('Received (Invalid Phone)');
-
-        const leadDataForQueue = {
-            timestamp: new Date().toISOString(),
-            source: 'Tilda Form',
-            name: tildaData.Name || tildaData.name || '',
-            phone: phone,
-            email: tildaData.Email || tildaData.email || '',
-            address: tildaData.Address || tildaData.address || '',
-            service: tildaData.service || tildaData.Service || '',
-            notes: JSON.stringify(tildaData)
-        };
-        const baseUrl = process.env.VERCEL_URL ? `https://${process.env.VERCEL_URL}` : `${req.protocol}://${req.get('host')}`;
-        await qstashClient.publishJSON({ url: `${baseUrl}/api/process-sheet-queue`, body: leadDataForQueue });
-        if (!res.headersSent) res.status(200).send('Queued');
-    } catch (e) {
-        if (!res.headersSent) res.status(200).send('Received (Error)');
-    }
-});
 
 module.exports = app;
