@@ -179,9 +179,8 @@ app.post('/api/message', async (req, res) => {
             
             if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
                 const text = assistantMessage.content[0].text.value
-                    .replace(/【\d+:\d+†.*?】/g, '') // Удаляем цитаты вида 【6:1†file.txt】
-                    .replace(/【.*?†source】/g, '') // Удаляем старый формат цитат
-                    .replace(/\[\d+:\d+†[^\]]+\]/g, '') // Удаляем формат [4:0†file]
+                    .replace(/【.*?】/g, '') // Агрессивное удаление: всё, что внутри толстых скобок
+                    .replace(/\[\d+:\d+†[^\]]+\]/g, '') // Удаляем редкий формат [4:0†file]
                     .trim();
 
                 res.json({ 
