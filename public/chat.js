@@ -1,7 +1,8 @@
 (function() {
+  console.log('Chat Widget v2 loaded'); // Проверка версии в консоли
+
   // --- КОНФИГУРАЦИЯ ---
   const config = {
-    // Твой рабочий бэкенд на Vercel
     apiEndpoint: 'https://repair-asap-proxy.vercel.app', 
     primaryColor: '#0066CC',
     fontFamily: 'Montserrat, sans-serif',
@@ -12,7 +13,6 @@
 
   let state = { threadId: null, isOpen: false, isLoading: false };
 
-  // 1. Вставка стилей (CSS)
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
@@ -20,7 +20,7 @@
           position: fixed; 
           bottom: 20px; 
           right: 20px; 
-          z-index: 999999; /* Очень высокий слой */
+          z-index: 999999;
           font-family: ${config.fontFamily}; 
       }
       
@@ -36,7 +36,7 @@
           justify-content: center; 
           cursor: pointer; 
           box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); 
-          transition: transform 0.3s ease; 
+          transition: transform 0.3s ease, opacity 0.3s ease; 
       }
       #repair-asap-chat-button:hover { transform: scale(1.05); }
       #repair-asap-chat-button svg { width: 30px; height: 30px; }
@@ -54,15 +54,15 @@
           display: flex; 
           flex-direction: column; 
           overflow: hidden; 
-          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); 
           opacity: 0; 
           transform: translateY(20px) scale(0.95); 
           pointer-events: none; 
           border: 1px solid #eee;
-          visibility: hidden; /* Скрываем полностью, когда закрыт */
+          visibility: hidden;
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1);
       }
       
-      /* Состояние "Открыто" */
+      /* Состояние "Открыто" (Десктоп) */
       #repair-asap-chat-window.open { 
           opacity: 1; 
           transform: translateY(0) scale(1); 
@@ -70,7 +70,65 @@
           visibility: visible;
       }
       
-      /* Внутренности чата */
+      /* --- МОБИЛЬНАЯ АДАПТАЦИЯ (ЖЕСТКАЯ) --- */
+      @media (max-width: 600px) {
+        /* Контейнер на весь экран */
+        #repair-asap-chatbot-container.mobile-active {
+            bottom: 0 !important;
+            right: 0 !important;
+            left: 0 !important;
+            top: 0 !important;
+            width: 100% !important;
+            height: 100% !important;
+            height: 100dvh !important; /* Для Safari */
+        }
+
+        /* Кнопка исчезает при открытии */
+        #repair-asap-chatbot-container.mobile-active #repair-asap-chat-button {
+            display: none !important;
+            opacity: 0 !important;
+            pointer-events: none !important;
+        }
+
+        /* Окно чата на весь экран */
+        #repair-asap-chat-window {
+            width: 100% !important;
+            height: 100% !important;
+            height: 100dvh !important;
+            max-height: none !important;
+            bottom: 0 !important;
+            right: 0 !important;
+            left: 0 !important;
+            top: 0 !important;
+            border-radius: 0 !important;
+            position: fixed !important;
+            transform: none !important; /* Отключаем анимацию сдвига */
+            transition: opacity 0.2s ease !important; /* Только прозрачность */
+        }
+
+        /* Открытое состояние на мобильном */
+        #repair-asap-chat-window.open {
+            opacity: 1 !important;
+            visibility: visible !important;
+            pointer-events: all !important;
+            display: flex !important;
+        }
+        
+        #repair-asap-chat-header {
+            padding: 15px !important;
+            height: 60px;
+        }
+        
+        #repair-asap-chat-messages {
+            font-size: 16px !important; /* Читаемый текст */
+        }
+        
+        #repair-asap-chat-input {
+            font-size: 16px !important; /* Чтобы не зумил */
+        }
+      }
+
+      /* Общие стили содержимого */
       #repair-asap-chat-header { background-color: ${config.primaryColor}; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
       #repair-asap-chat-close { cursor: pointer; background: none; border: none; color: white; font-size: 24px; line-height: 1; padding: 0; opacity: 0.8; }
       
@@ -81,64 +139,19 @@
       .bot-message a { color: ${config.primaryColor}; text-decoration: none; border-bottom: 1px solid rgba(0,102,204,0.3); }
       
       #repair-asap-chat-input-container { padding: 15px; background: white; border-top: 1px solid #eee; display: flex; gap: 10px; align-items: center; }
-      #repair-asap-chat-input { flex: 1; padding: 12px 15px; border: 1px solid #ddd; border-radius: 25px; outline: none; font-size: 16px; /* 16px чтобы iOS не зумил */ transition: border-color 0.2s; font-family: ${config.fontFamily}; }
+      #repair-asap-chat-input { flex: 1; padding: 12px 15px; border: 1px solid #ddd; border-radius: 25px; outline: none; font-size: 16px; transition: border-color 0.2s; font-family: ${config.fontFamily}; }
       #repair-asap-chat-input:focus { border-color: ${config.primaryColor}; }
       #repair-asap-chat-send { background-color: ${config.primaryColor}; color: white; border: none; border-radius: 50%; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
       #repair-asap-chat-send svg { width: 18px; height: 18px; fill: white; margin-left: 2px; }
       
       @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
       .loading-indicator { padding: 10px 15px; color: #888; font-size: 13px; display: flex; align-items: center; font-style: italic; }
-      .loading-dots span { width: 5px; height: 5px; margin: 0 2px; background-color: #888; border-radius: 50%; display: inline-block; animation: bounce 1.4s infinite ease-in-out both; }
-      @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
       .auto-filled-field { animation: highlight-field 1.5s ease-in-out; border-color: ${config.primaryColor} !important; }
       @keyframes highlight-field { 0% { background-color: white; } 50% { background-color: #e6f7ff; } 100% { background-color: white; } }
-
-      /* === ВАЖНО: МОБИЛЬНАЯ АДАПТАЦИЯ (ИСПРАВЛЕНА) === */
-      @media (max-width: 480px) {
-        #repair-asap-chatbot-container.mobile-open {
-            bottom: 0;
-            right: 0;
-            left: 0;
-            top: 0;
-            width: 100%;
-            height: 100%;
-        }
-
-        #repair-asap-chat-window { 
-            position: fixed !important; /* Фиксируем жестко */
-            top: 0 !important;
-            left: 0 !important;
-            right: 0 !important;
-            bottom: 0 !important;
-            width: 100% !important;
-            height: 100% !important; /* Фолбэк */
-            height: 100dvh !important; /* Учитываем адресную строку */
-            max-height: none !important;
-            border-radius: 0 !important;
-            transform: translateY(110%); 
-            z-index: 2147483647 !important; /* Максимальный слой */
-            box-shadow: none;
-        }
-        
-        #repair-asap-chat-window.open { 
-            transform: translateY(0) !important;
-            opacity: 1;
-        }
-
-        /* Скрываем кнопку, когда чат открыт на мобильном */
-        .mobile-open #repair-asap-chat-button {
-            display: none !important;
-        }
-        
-        #repair-asap-chat-messages {
-            font-size: 16px; /* Крупнее текст на телефоне */
-        }
-      }
     `;
     document.head.appendChild(style);
   }
 
-  // 2. Создание интерфейса
   function createChatUI() {
     const container = document.getElementById(containerId);
     if (!container) return;
@@ -167,7 +180,7 @@
     chatInput.id = 'repair-asap-chat-input';
     chatInput.type = 'text';
     chatInput.placeholder = 'Message...';
-    chatInput.setAttribute('enterkeyhint', 'send'); // Кнопка "Send" на мобильной клавиатуре
+    chatInput.setAttribute('enterkeyhint', 'send');
     chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
     
     const chatSend = document.createElement('button');
@@ -196,25 +209,21 @@
     state.isOpen = !state.isOpen;
     
     if (state.isOpen) {
-        // Открываем
+        // Открытие
         chatWindow.classList.add('open');
-        container.classList.add('mobile-open'); // Класс для управления стилями на мобильном
+        container.classList.add('mobile-active'); // Новый класс для блокировки позиционирования
         
-        // Фокус с задержкой для плавности анимации
+        // Скролл вниз
         setTimeout(() => { 
             const msgs = document.getElementById('repair-asap-chat-messages');
             msgs.scrollTop = msgs.scrollHeight;
-            // На мобильном не ставим автофокус сразу, чтобы не выпрыгивала клавиатура и не закрывала чат
-            if (window.innerWidth > 480) {
-                document.getElementById('repair-asap-chat-input').focus(); 
-            }
-        }, 300);
+        }, 100);
     } else {
-        // Закрываем
+        // Закрытие
         chatWindow.classList.remove('open');
+        // Задержка удаления класса, чтобы не дергалось
         setTimeout(() => {
-            // Убираем класс контейнера только после анимации, чтобы кнопка не прыгнула
-            if (!state.isOpen) container.classList.remove('mobile-open');
+            if (!state.isOpen) container.classList.remove('mobile-active');
         }, 300);
     }
   }
@@ -245,7 +254,7 @@
     if (!message || state.isLoading || !state.threadId) return;
     
     inputEl.value = '';
-    inputEl.blur(); // Скрываем клавиатуру на мобильном, чтобы видеть ответ
+    // inputEl.blur(); // Убрал blur, чтобы клавиатура не прыгала лишний раз
     addMessageToUI('user', message);
     state.isLoading = true;
     showLoading();
