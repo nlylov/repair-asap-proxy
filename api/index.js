@@ -1,4 +1,4 @@
-// api/index.js (CLEAN VERSION: No Tilda, Better Booking Flow)
+// api/index.js (VERSION: Assistants API + Telegram Monitoring)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -9,9 +9,8 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const config = require('../lib/config');
 const { appendLeadToSheet } = require('../lib/googleSheetService');
-const { logInfo, logError, logger, logWarn } = require('../lib/utils/log');
+const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
-// Удален импорт QStash, так как он был нужен только для Tilda
 // --- КОНЕЦ: Блок Импортов ---
 
 const app = express();
@@ -23,7 +22,7 @@ try {
         openai = new OpenAI({ apiKey: config.openai.apiKey });
         logger.info('OpenAI client initialized successfully.');
     } else {
-        logger.error('OpenAI credentials missing (API Key or Assistant ID)');
+        logger.error('OpenAI credentials missing');
     }
 } catch (error) {
     logger.error('Failed to initialize OpenAI client', error);
@@ -41,77 +40,81 @@ app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// --- ФУНКЦИЯ: Отправка в Telegram ---
+async function sendToTelegram(text) {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_ADMIN_ID;
+
+    if (!token || !chatId) return; // Если не настроено, молча пропускаем
+
+    try {
+        const url = `https://api.telegram.org/bot${token}/sendMessage`;
+        await fetch(url, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                chat_id: chatId,
+                text: text,
+                parse_mode: 'HTML' // Позволяет делать жирный текст
+            })
+        });
+    } catch (error) {
+        console.error('Telegram Error:', error);
+    }
+}
+
 // --- РОУТЫ ---
 
-// 1. Создание треда
 app.post('/api/thread', async (req, res) => {
-    logInfo(req, '/api/thread', 'Create thread requested');
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
     try {
       const thread = await openai.beta.threads.create();
-      logInfo(req, '/api/thread', 'Thread created successfully', { threadId: thread.id });
+      
+      // Уведомление о новом диалоге
+      sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
+      
       res.json({ threadId: thread.id });
     } catch (error) {
-      logError(req, '/api/thread', 'Error creating thread', error);
       res.status(500).json({ error: 'Failed to create thread' });
     }
 });
 
-// 2. Обработка сообщений
 app.post('/api/message', async (req, res) => {
     const context = '/api/message';
-    
-    if (!openai) {
-        logError(req, context, 'OpenAI not initialized');
-        return res.status(500).json({ error: 'Server configuration error' });
-    }
+    if (!openai) return res.status(500).json({ error: 'Config error' });
 
     try {
         const { threadId, message } = req.body;
-        if (!threadId || !message) {
-            return res.status(400).json({ error: 'Thread ID and message required' });
-        }
+        if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        // Добавляем сообщение пользователя
+        // 1. Шлем вопрос пользователя в Telegram
+        sendToTelegram(`👤 <b>User:</b> ${message}`);
+
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
-        logInfo(req, context, 'User message added', { threadId });
 
-        // Запускаем Ассистента
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
             additional_instructions: `
-Current date and time: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
-
-IMPORTANT BOOKING RULES:
-1. You HAVE a tool named 'saveBookingToSheet'. Use it to save bookings.
-2. To use the tool, you MUST have the user's NAME and PHONE number.
-3. IF the user asks to book/schedule but is missing the phone number: DO NOT say "I cannot book". Instead, ASK for the phone number.
-4. Once you have Name and Phone, execute 'saveBookingToSheet' immediately.
-5. IF the user asks about price AND booking in the same message: Provide the price estimation FIRST, then confirm the booking.
-6. Never redirect the user to the website for booking if they are providing details in chat. You are the booking agent.
-7. STRICTLY FORBIDDEN: Do NOT mention WhatsApp or suggest contacting via WhatsApp. Use ONLY the tool provided.
-8. After using the tool successfully, confirm to the user that the request is received. Do not apologize or mention "system errors" if the tool output says "Saved successfully".
+Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
+IMPORTANT:
+1. Use 'saveBookingToSheet' to save bookings (Name + Phone required).
+2. If phone is missing, ASK for it.
+3. NEVER mention WhatsApp.
+4. If asked about price AND booking, give price FIRST.
 `
         });
-        
-        logInfo(req, context, 'Run created', { runId: run.id });
 
-        // Ждем ответа (Polling)
         let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
         const startTime = Date.now();
-        const timeoutMs = 50000; 
-
-        // Переменная для хранения действия формы
         let formActionData = null;
 
         while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
-            // Проверка таймаута
-            if (Date.now() - startTime > timeoutMs) {
+            if (Date.now() - startTime > 50000) {
                 try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch(e) {}
-                return res.status(504).json({ error: 'Timeout waiting for AI' });
+                sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
+                return res.status(504).json({ error: 'Timeout' });
             }
 
-            // Обработка вызова функций
             if (runStatus.status === 'requires_action') {
                 const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
                 let toolOutputs = [];
@@ -121,18 +124,14 @@ IMPORTANT BOOKING RULES:
                         try {
                             const args = JSON.parse(toolCall.function.arguments);
                             
-                            // Запоминаем данные для фронтенда
+                            // Уведомление о ЛИДЕ в Telegram!
+                            sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${args.phone}\nService: ${args.service || 'N/A'}`);
+
                             formActionData = {
                                 type: 'FILL_FORM',
-                                payload: {
-                                    name: args.name || '',
-                                    phone: args.phone || '',
-                                    email: args.email || '',
-                                    service: args.service || ''
-                                }
+                                payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
                             };
 
-                            // Сохраняем в Google Sheet
                             const leadData = {
                                 reqId: req.id,
                                 timestamp: new Date().toISOString(),
@@ -153,48 +152,35 @@ IMPORTANT BOOKING RULES:
                                     message: sheetResult.success ? 'Saved successfully.' : 'Failed to save.'
                                 })
                             });
-
                         } catch (err) {
-                            toolOutputs.push({
-                                tool_call_id: toolCall.id,
-                                output: JSON.stringify({ status: 'Error', message: err.message })
-                            });
+                            toolOutputs.push({ tool_call_id: toolCall.id, output: JSON.stringify({ status: 'Error', message: err.message }) });
                         }
-                    } else {
-                        // Неизвестная функция
-                        toolOutputs.push({
-                            tool_call_id: toolCall.id,
-                            output: JSON.stringify({ status: 'Error', message: 'Function not found' })
-                        });
                     }
                 }));
 
-                // Отправляем результаты функций обратно в OpenAI
                 if (toolOutputs.length > 0) {
                     runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
                 }
             }
 
-            // Пауза перед следующей проверкой
             await new Promise(resolve => setTimeout(resolve, 1000));
             runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
         }
 
-        // Обработка завершения
         if (runStatus.status === 'completed') {
             const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
             const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
             
             if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
                 const text = assistantMessage.content[0].text.value
-                    .replace(/【.*?】/g, '') // Агрессивное удаление: всё, что внутри толстых скобок
-                    .replace(/\[\d+:\d+†[^\]]+\]/g, '') // Удаляем редкий формат [4:0†file]
+                    .replace(/【.*?】/g, '')
+                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
                     .trim();
 
-                res.json({ 
-                    message: text,
-                    action: formActionData 
-                });
+                // 2. Шлем ответ бота в Telegram
+                sendToTelegram(`🤖 <b>Bot:</b> ${text}`);
+
+                res.json({ message: text, action: formActionData });
             } else {
                 res.status(500).json({ error: 'No text response' });
             }
@@ -208,7 +194,6 @@ IMPORTANT BOOKING RULES:
     }
 });
 
-// --- Health Check ---
-app.get('/api/health', (req, res) => res.json({ status: 'ok', config_check: !!config.openai.apiKey }));
+app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 module.exports = app;
