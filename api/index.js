@@ -1,4 +1,4 @@
-// api/index.js (VERSION: Assistants API + Telegram Monitoring)
+// api/index.js (VERSION: Assistants API + Telegram Monitoring STABLE)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -70,8 +70,8 @@ app.post('/api/thread', async (req, res) => {
     try {
       const thread = await openai.beta.threads.create();
       
-      // Уведомление о новом диалоге
-      sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
+      // AWAIT добавлен для надежности
+      await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
       
       res.json({ threadId: thread.id });
     } catch (error) {
@@ -87,8 +87,8 @@ app.post('/api/message', async (req, res) => {
         const { threadId, message } = req.body;
         if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        // 1. Шлем вопрос пользователя в Telegram
-        sendToTelegram(`👤 <b>User:</b> ${message}`);
+        // 1. Шлем вопрос пользователя (ждем отправки)
+        await sendToTelegram(`👤 <b>User:</b> ${message}`);
 
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
 
@@ -111,7 +111,7 @@ IMPORTANT:
         while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
             if (Date.now() - startTime > 50000) {
                 try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch(e) {}
-                sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
+                await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
                 return res.status(504).json({ error: 'Timeout' });
             }
 
@@ -124,8 +124,8 @@ IMPORTANT:
                         try {
                             const args = JSON.parse(toolCall.function.arguments);
                             
-                            // Уведомление о ЛИДЕ в Telegram!
-                            sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${args.phone}\nService: ${args.service || 'N/A'}`);
+                            // Уведомление о ЛИДЕ в Telegram (ждем отправки)
+                            await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${args.phone}\nService: ${args.service || 'N/A'}`);
 
                             formActionData = {
                                 type: 'FILL_FORM',
@@ -177,8 +177,8 @@ IMPORTANT:
                     .replace(/\[\d+:\d+†[^\]]+\]/g, '')
                     .trim();
 
-                // 2. Шлем ответ бота в Telegram
-                sendToTelegram(`🤖 <b>Bot:</b> ${text}`);
+                // 2. Шлем ответ бота в Telegram (ВАЖНО: ждем отправки)
+                await sendToTelegram(`🤖 <b>Bot:</b> ${text}`);
 
                 res.json({ message: text, action: formActionData });
             } else {
