@@ -1,4 +1,4 @@
-// api/index.js (VERSION: CRM Integration + Google Sheet Backup + Telegram)
+// api/index.js (VERSION: Aggressive Booking & CRM Integration)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -9,7 +9,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const config = require('../lib/config');
 const { appendLeadToSheet } = require('../lib/googleSheetService');
-const { sendLeadToCRM } = require('../lib/crmService'); // <--- НОВЫЙ ИМПОРТ CRM
+const { sendLeadToCRM } = require('../lib/crmService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
 // --- КОНЕЦ: Блок Импортов ---
@@ -85,22 +85,22 @@ app.post('/api/message', async (req, res) => {
         const { threadId, message } = req.body;
         if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        // 1. Шлем вопрос пользователя в Telegram
         await sendToTelegram(`👤 <b>User:</b> ${message}`);
 
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
 
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
+            // ЖЕСТКИЕ инструкции: Сохранять ВСЕГДА
             additional_instructions: `
 Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
 
 CRITICAL RULES FOR BOOKING:
 1. You have a function called 'saveBookingToSheet'.
 2. IF you have the user's Name AND Phone, you MUST call 'saveBookingToSheet' IMMEDIATELY.
-3. DO NOT write text like "I am saving..." or "One moment" before calling the function. CALL THE FUNCTION FIRST.
-4. DO NOT say "I have recorded your request" unless you have successfully called the function.
-5. If Name or Phone is missing, ASK for it.
+3. TREAT EVERY INPUT WITH NAME AND PHONE AS A REAL LEADS. Even if user says "test", "fake", "checking", YOU MUST SAVE IT.
+4. Do NOT judge the intent. Your job is to CAPTURE data.
+5. DO NOT write text like "I am saving..." or "One moment" before calling the function. CALL THE FUNCTION FIRST.
 6. NEVER mention WhatsApp.
 7. If the user asks for price AND booking, provide the price first, then immediately call the function.
 `
@@ -129,7 +129,6 @@ CRITICAL RULES FOR BOOKING:
                             const args = JSON.parse(toolCall.function.arguments);
                             const cleanPhone = normalizePhone(args.phone);
                             
-                            // Уведомление о попытке сохранения
                             await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
 
                             formActionData = {
@@ -149,29 +148,15 @@ CRITICAL RULES FOR BOOKING:
                             };
                             
                             // --- ПАРАЛЛЕЛЬНАЯ ОТПРАВКА (CRM + Таблица) ---
-                            
-                            // 1. Отправка в CRM (ProsBuddy / GoHighLevel)
-                            const crmPromise = sendLeadToCRM(leadData).then(res => {
-                                return res.success ? "✅ CRM Sent" : `❌ CRM Fail: ${res.error}`;
-                            });
+                            const crmPromise = sendLeadToCRM(leadData).then(res => res.success ? "✅ CRM Sent" : `❌ CRM Fail: ${res.error}`);
+                            const sheetPromise = appendLeadToSheet(req, leadData).then(res => res.success ? "✅ Sheet Saved" : `❌ Sheet Fail: ${res.error}`);
 
-                            // 2. Отправка в Google Sheet (Резерв)
-                            const sheetPromise = appendLeadToSheet(req, leadData).then(res => {
-                                return res.success ? "✅ Sheet Saved" : `❌ Sheet Fail: ${res.error}`;
-                            });
-
-                            // Ждем оба результата (чтобы бот не завис, если один сервис медленный)
                             const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
-
-                            // Отчет в Telegram о статусе сохранения
                             await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
                             
                             toolOutputs.push({
                                 tool_call_id: toolCall.id,
-                                output: JSON.stringify({ 
-                                    status: 'OK', 
-                                    message: 'Saved successfully.' 
-                                })
+                                output: JSON.stringify({ status: 'OK', message: 'Saved successfully.' })
                             });
                         } catch (err) {
                             toolOutputs.push({ tool_call_id: toolCall.id, output: JSON.stringify({ status: 'Error', message: err.message }) });
@@ -198,9 +183,9 @@ CRITICAL RULES FOR BOOKING:
                     .replace(/\[\d+:\d+†[^\]]+\]/g, '')
                     .trim();
 
-                // Детектор лжи
+                // Улучшенный детектор лжи
                 const lowerText = text.toLowerCase();
-                const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') || lowerText.includes('booked') || lowerText.includes('saved');
+                const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') || lowerText.includes('оформил') || lowerText.includes('зарегистрировал') || lowerText.includes('booked') || lowerText.includes('saved');
                 
                 if (botClaimsSave && !toolCalled) {
                     await sendToTelegram(`⚠️ <b>WARNING:</b> Бот сказал "Записал", но НЕ вызвал функцию.`);
