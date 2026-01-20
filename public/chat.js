@@ -1,107 +1,173 @@
 (function() {
-  // --- Конфигурация ---
+  // --- КОНФИГУРАЦИЯ ---
   const config = {
-    apiEndpoint: 'https://api.asap.repair', // Убедись, что это твой актуальный URL
+    // Твой рабочий бэкенд на Vercel
+    apiEndpoint: 'https://repair-asap-proxy.vercel.app', 
     primaryColor: '#0066CC',
     fontFamily: 'Montserrat, sans-serif',
-    storageKey: 'repair_asap_thread_id' // Ключ для сохранения сессии
+    storageKey: 'repair_asap_thread_id'
   };
   const containerId = 'repair-asap-chatbot';
   // --------------------
 
   let state = { threadId: null, isOpen: false, isLoading: false };
 
+  // 1. Вставка стилей (CSS)
   function injectStyles() {
     const style = document.createElement('style');
     style.textContent = `
-      #repair-asap-chatbot-container { position: fixed; bottom: 20px; right: 20px; z-index: 9999; font-family: ${config.fontFamily}; }
+      #repair-asap-chatbot-container { 
+          position: fixed; 
+          bottom: 20px; 
+          right: 20px; 
+          z-index: 999999; /* Очень высокий слой */
+          font-family: ${config.fontFamily}; 
+      }
       
       /* Кнопка чата */
-      #repair-asap-chat-button { width: 60px; height: 60px; border-radius: 50%; background-color: ${config.primaryColor}; color: white; display: flex; align-items: center; justify-content: center; cursor: pointer; box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2); transition: all 0.3s ease; }
+      #repair-asap-chat-button { 
+          width: 60px; 
+          height: 60px; 
+          border-radius: 50%; 
+          background-color: ${config.primaryColor}; 
+          color: white; 
+          display: flex; 
+          align-items: center; 
+          justify-content: center; 
+          cursor: pointer; 
+          box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3); 
+          transition: transform 0.3s ease; 
+      }
       #repair-asap-chat-button:hover { transform: scale(1.05); }
       #repair-asap-chat-button svg { width: 30px; height: 30px; }
       
-      /* Окно чата */
-      #repair-asap-chat-window { position: absolute; bottom: 80px; right: 0; width: 360px; height: 550px; background-color: white; border-radius: 12px; box-shadow: 0 5px 25px rgba(0, 0, 0, 0.15); display: flex; flex-direction: column; overflow: hidden; transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); opacity: 0; transform: translateY(20px) scale(0.95); pointer-events: none; border: 1px solid #eee; }
-      #repair-asap-chat-window.open { opacity: 1; transform: translateY(0) scale(1); pointer-events: all; }
+      /* Окно чата (Десктоп) */
+      #repair-asap-chat-window { 
+          position: absolute; 
+          bottom: 80px; 
+          right: 0; 
+          width: 360px; 
+          height: 550px; 
+          background-color: white; 
+          border-radius: 12px; 
+          box-shadow: 0 5px 25px rgba(0, 0, 0, 0.2); 
+          display: flex; 
+          flex-direction: column; 
+          overflow: hidden; 
+          transition: all 0.3s cubic-bezier(0.25, 0.8, 0.25, 1); 
+          opacity: 0; 
+          transform: translateY(20px) scale(0.95); 
+          pointer-events: none; 
+          border: 1px solid #eee;
+          visibility: hidden; /* Скрываем полностью, когда закрыт */
+      }
       
-      /* Заголовок */
+      /* Состояние "Открыто" */
+      #repair-asap-chat-window.open { 
+          opacity: 1; 
+          transform: translateY(0) scale(1); 
+          pointer-events: all; 
+          visibility: visible;
+      }
+      
+      /* Внутренности чата */
       #repair-asap-chat-header { background-color: ${config.primaryColor}; color: white; padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; font-weight: 600; }
       #repair-asap-chat-close { cursor: pointer; background: none; border: none; color: white; font-size: 24px; line-height: 1; padding: 0; opacity: 0.8; }
-      #repair-asap-chat-close:hover { opacity: 1; }
       
-      /* Область сообщений */
       #repair-asap-chat-messages { flex: 1; overflow-y: auto; padding: 20px; display: flex; flex-direction: column; gap: 12px; background-color: #f9f9f9; }
       .chat-message { max-width: 85%; padding: 12px 16px; border-radius: 18px; font-size: 14px; line-height: 1.5; word-wrap: break-word; animation: fadeIn 0.3s ease; }
       .user-message { background-color: #E3F2FD; color: #0d47a1; align-self: flex-end; border-bottom-right-radius: 4px; }
       .bot-message { background-color: #FFFFFF; color: #333; align-self: flex-start; border-bottom-left-radius: 4px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); border: 1px solid #eee; }
       .bot-message a { color: ${config.primaryColor}; text-decoration: none; border-bottom: 1px solid rgba(0,102,204,0.3); }
-      .bot-message a:hover { border-bottom-color: ${config.primaryColor}; }
       
-      /* Ввод текста */
       #repair-asap-chat-input-container { padding: 15px; background: white; border-top: 1px solid #eee; display: flex; gap: 10px; align-items: center; }
-      #repair-asap-chat-input { flex: 1; padding: 12px 15px; border: 1px solid #ddd; border-radius: 25px; outline: none; font-size: 14px; transition: border-color 0.2s; font-family: ${config.fontFamily}; }
+      #repair-asap-chat-input { flex: 1; padding: 12px 15px; border: 1px solid #ddd; border-radius: 25px; outline: none; font-size: 16px; /* 16px чтобы iOS не зумил */ transition: border-color 0.2s; font-family: ${config.fontFamily}; }
       #repair-asap-chat-input:focus { border-color: ${config.primaryColor}; }
-      #repair-asap-chat-send { background-color: ${config.primaryColor}; color: white; border: none; border-radius: 50%; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; transition: background 0.2s; }
-      #repair-asap-chat-send:hover { background-color: #0055aa; }
+      #repair-asap-chat-send { background-color: ${config.primaryColor}; color: white; border: none; border-radius: 50%; width: 40px; height: 40px; cursor: pointer; display: flex; align-items: center; justify-content: center; }
       #repair-asap-chat-send svg { width: 18px; height: 18px; fill: white; margin-left: 2px; }
       
-      /* Анимации и Индикаторы */
       @keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
       .loading-indicator { padding: 10px 15px; color: #888; font-size: 13px; display: flex; align-items: center; font-style: italic; }
       .loading-dots span { width: 5px; height: 5px; margin: 0 2px; background-color: #888; border-radius: 50%; display: inline-block; animation: bounce 1.4s infinite ease-in-out both; }
-      .loading-dots span:nth-child(1) { animation-delay: -0.32s; }
-      .loading-dots span:nth-child(2) { animation-delay: -0.16s; }
       @keyframes bounce { 0%, 80%, 100% { transform: scale(0); } 40% { transform: scale(1); } }
-      
-      /* Подсветка авто-заполненных полей */
-      @keyframes highlight-field { 0% { background-color: white; } 50% { background-color: #e6f7ff; } 100% { background-color: white; } }
       .auto-filled-field { animation: highlight-field 1.5s ease-in-out; border-color: ${config.primaryColor} !important; }
+      @keyframes highlight-field { 0% { background-color: white; } 50% { background-color: #e6f7ff; } 100% { background-color: white; } }
 
-      /* === МОБИЛЬНАЯ АДАПТАЦИЯ === */
+      /* === ВАЖНО: МОБИЛЬНАЯ АДАПТАЦИЯ (ИСПРАВЛЕНА) === */
       @media (max-width: 480px) {
-        #repair-asap-chat-window { width: 100% !important; height: 100% !important; bottom: 0 !important; right: 0 !important; border-radius: 0 !important; transform: translateY(100%); z-index: 10000; }
-        #repair-asap-chat-window.open { transform: translateY(0); }
-        #repair-asap-chat-button { bottom: 20px; right: 20px; }
-        #repair-asap-chatbot-container { bottom: 0; right: 0; }
+        #repair-asap-chatbot-container.mobile-open {
+            bottom: 0;
+            right: 0;
+            left: 0;
+            top: 0;
+            width: 100%;
+            height: 100%;
+        }
+
+        #repair-asap-chat-window { 
+            position: fixed !important; /* Фиксируем жестко */
+            top: 0 !important;
+            left: 0 !important;
+            right: 0 !important;
+            bottom: 0 !important;
+            width: 100% !important;
+            height: 100% !important; /* Фолбэк */
+            height: 100dvh !important; /* Учитываем адресную строку */
+            max-height: none !important;
+            border-radius: 0 !important;
+            transform: translateY(110%); 
+            z-index: 2147483647 !important; /* Максимальный слой */
+            box-shadow: none;
+        }
+        
+        #repair-asap-chat-window.open { 
+            transform: translateY(0) !important;
+            opacity: 1;
+        }
+
+        /* Скрываем кнопку, когда чат открыт на мобильном */
+        .mobile-open #repair-asap-chat-button {
+            display: none !important;
+        }
+        
+        #repair-asap-chat-messages {
+            font-size: 16px; /* Крупнее текст на телефоне */
+        }
       }
     `;
     document.head.appendChild(style);
   }
 
+  // 2. Создание интерфейса
   function createChatUI() {
     const container = document.getElementById(containerId);
-    if (!container) return; // Silent fail if container missing
+    if (!container) return;
     
     const chatContainer = document.createElement('div');
     chatContainer.id = 'repair-asap-chatbot-container';
     
-    // Кнопка
     const chatButton = document.createElement('div');
     chatButton.id = 'repair-asap-chat-button';
     chatButton.innerHTML = `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="white"><path d="M20 2H4c-1.1 0-2 .9-2 2v18l4-4h14c1.1 0 2-.9 2-2V4c0-1.1-.9-2-2-2zm0 14H6l-2 2V4h16v12z"/></svg>`;
     chatButton.addEventListener('click', toggleChat);
     
-    // Окно
     const chatWindow = document.createElement('div');
     chatWindow.id = 'repair-asap-chat-window';
     
-    // Header
     const chatHeader = document.createElement('div');
     chatHeader.id = 'repair-asap-chat-header';
     chatHeader.innerHTML = `<span>Repair ASAP</span><button id="repair-asap-chat-close">×</button>`;
     
-    // Messages
     const chatMessages = document.createElement('div');
     chatMessages.id = 'repair-asap-chat-messages';
     
-    // Input
     const chatInputContainer = document.createElement('div');
     chatInputContainer.id = 'repair-asap-chat-input-container';
     const chatInput = document.createElement('input');
     chatInput.id = 'repair-asap-chat-input';
     chatInput.type = 'text';
     chatInput.placeholder = 'Message...';
+    chatInput.setAttribute('enterkeyhint', 'send'); // Кнопка "Send" на мобильной клавиатуре
     chatInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') sendMessage(); });
     
     const chatSend = document.createElement('button');
@@ -125,40 +191,49 @@
 
   function toggleChat() {
     const chatWindow = document.getElementById('repair-asap-chat-window');
-    state.isOpen = !state.isOpen;
-    chatWindow.classList.toggle('open', state.isOpen);
+    const container = document.getElementById('repair-asap-chatbot-container');
     
-    // При открытии - фокус на инпут и прокрутка вниз
+    state.isOpen = !state.isOpen;
+    
     if (state.isOpen) {
-      setTimeout(() => { 
-          document.getElementById('repair-asap-chat-input').focus(); 
-          const msgs = document.getElementById('repair-asap-chat-messages');
-          msgs.scrollTop = msgs.scrollHeight;
-      }, 300);
+        // Открываем
+        chatWindow.classList.add('open');
+        container.classList.add('mobile-open'); // Класс для управления стилями на мобильном
+        
+        // Фокус с задержкой для плавности анимации
+        setTimeout(() => { 
+            const msgs = document.getElementById('repair-asap-chat-messages');
+            msgs.scrollTop = msgs.scrollHeight;
+            // На мобильном не ставим автофокус сразу, чтобы не выпрыгивала клавиатура и не закрывала чат
+            if (window.innerWidth > 480) {
+                document.getElementById('repair-asap-chat-input').focus(); 
+            }
+        }, 300);
+    } else {
+        // Закрываем
+        chatWindow.classList.remove('open');
+        setTimeout(() => {
+            // Убираем класс контейнера только после анимации, чтобы кнопка не прыгнула
+            if (!state.isOpen) container.classList.remove('mobile-open');
+        }, 300);
     }
   }
 
   async function initThread() {
-    // 1. Пытаемся восстановить ID из localStorage
     const storedThreadId = localStorage.getItem(config.storageKey);
-    
     if (storedThreadId) {
         state.threadId = storedThreadId;
-        console.log('Chat session restored:', state.threadId);
-        // Можно добавить сообщение "Welcome back", если история пуста в UI
         if (document.getElementById('repair-asap-chat-messages').children.length === 0) {
              addMessageToUI('bot', 'Hello! I am ready to help you again.');
         }
         return;
     }
-
-    // 2. Если нет - создаем новый
     try {
       const response = await fetch(`${config.apiEndpoint}/api/thread`, { method: 'POST' });
       if (response.ok) {
         const data = await response.json();
         state.threadId = data.threadId;
-        localStorage.setItem(config.storageKey, state.threadId); // Сохраняем
+        localStorage.setItem(config.storageKey, state.threadId);
         addMessageToUI('bot', 'Hello! How can I help you with your repair needs today?');
       }
     } catch (e) { console.error('Init failed', e); }
@@ -170,6 +245,7 @@
     if (!message || state.isLoading || !state.threadId) return;
     
     inputEl.value = '';
+    inputEl.blur(); // Скрываем клавиатуру на мобильном, чтобы видеть ответ
     addMessageToUI('user', message);
     state.isLoading = true;
     showLoading();
@@ -189,65 +265,34 @@
       
       if (data.message) {
         addMessageToUI('bot', data.message);
-        
-        // === ЛОГИКА АВТОЗАПОЛНЕНИЯ ФОРМЫ ===
         if (data.action && data.action.type === 'FILL_FORM') {
             triggerWebsiteForm(data.action.payload);
         }
-        // ===================================
       }
-      
     } catch (error) {
       removeLoading();
       addMessageToUI('bot', 'Sorry, I am having trouble connecting right now.');
-      console.error(error);
     } finally {
       state.isLoading = false;
     }
   }
 
-  // --- Функция-магия для сайта ---
   function triggerWebsiteForm(payload) {
-    console.log('🤖 Bot is auto-filling the form:', payload);
-    
-    // Хелпер для заполнения и триггера событий
     const fill = (selector, value) => {
-        // Ищем по селектору или атрибуту name
-        const el = document.querySelector(selector) || 
-                   document.querySelector(`input[name="${selector}"]`) ||
-                   document.querySelector(`input[name="${selector.toLowerCase()}"]`); // name="phone"
-                   
+        const el = document.querySelector(selector) || document.querySelector(`input[name="${selector}"]`) || document.querySelector(`input[name="${selector.toLowerCase()}"]`);
         if (el && value) {
             el.value = value;
             el.classList.add('auto-filled-field');
-            // Важно для Тильды/React/Angular форм:
             el.dispatchEvent(new Event('input', { bubbles: true }));
-            el.dispatchEvent(new Event('change', { bubbles: true }));
-            el.dispatchEvent(new Event('blur', { bubbles: true }));
-            return el; // Возвращаем элемент, чтобы найти родительскую форму
+            return el;
         }
         return null;
     };
-
     fill('Name', payload.name);
     fill('Email', payload.email);
     const phoneEl = fill('Phone', payload.phone) || fill('Tel', payload.phone);
-
-    // Пытаемся найти кнопку отправки
     if (phoneEl && phoneEl.form) {
-        const form = phoneEl.form;
-        const btn = form.querySelector('button[type="submit"]') || form.querySelector('.t-submit');
-        
-        if (btn) {
-            // Скроллим к форме плавно
-            form.scrollIntoView({ behavior: 'smooth', block: 'center' });
-            
-            // Жмем кнопку через секунду (для эффекта)
-            setTimeout(() => {
-                console.log('🤖 Bot clicking submit...');
-                btn.click();
-            }, 1500);
-        }
+        phoneEl.form.scrollIntoView({ behavior: 'smooth', block: 'center' });
     }
   }
 
@@ -255,12 +300,7 @@
     const container = document.getElementById('repair-asap-chat-messages');
     const div = document.createElement('div');
     div.className = `chat-message ${sender === 'user' ? 'user-message' : 'bot-message'}`;
-    
-    // Markdown links & line breaks
-    let html = text
-        .replace(/\n/g, '<br>') // Сохраняем переносы строк
-        .replace(/\[([^\]]+)]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
-        
+    let html = text.replace(/\n/g, '<br>').replace(/\[([^\]]+)]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank">$1</a>');
     div.innerHTML = html;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
@@ -271,7 +311,7 @@
     const div = document.createElement('div');
     div.id = 'chat-loading';
     div.className = 'loading-indicator';
-    div.innerHTML = `Thinking <div class="loading-dots"><span></span><span></span><span></span></div>`;
+    div.innerHTML = `Thinking...`;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
   }
