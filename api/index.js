@@ -1,4 +1,4 @@
-// api/index.js (VERSION: Assistants API + Telegram Monitoring STABLE)
+// api/index.js (VERSION: CRM Integration + Google Sheet Backup + Telegram)
 
 // --- НАЧАЛО: Блок Импортов ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -9,6 +9,7 @@ const path = require('path');
 const { v4: uuidv4 } = require('uuid');
 const config = require('../lib/config');
 const { appendLeadToSheet } = require('../lib/googleSheetService');
+const { sendLeadToCRM } = require('../lib/crmService'); // <--- НОВЫЙ ИМПОРТ CRM
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
 // --- КОНЕЦ: Блок Импортов ---
@@ -45,7 +46,7 @@ async function sendToTelegram(text) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_ADMIN_ID;
 
-    if (!token || !chatId) return; // Если не настроено, молча пропускаем
+    if (!token || !chatId) return; 
 
     try {
         const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -55,7 +56,7 @@ async function sendToTelegram(text) {
             body: JSON.stringify({
                 chat_id: chatId,
                 text: text,
-                parse_mode: 'HTML' // Позволяет делать жирный текст
+                parse_mode: 'HTML' 
             })
         });
     } catch (error) {
@@ -69,10 +70,7 @@ app.post('/api/thread', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
     try {
       const thread = await openai.beta.threads.create();
-      
-      // AWAIT добавлен для надежности
       await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
-      
       res.json({ threadId: thread.id });
     } catch (error) {
       res.status(500).json({ error: 'Failed to create thread' });
@@ -87,7 +85,7 @@ app.post('/api/message', async (req, res) => {
         const { threadId, message } = req.body;
         if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        // 1. Шлем вопрос пользователя (ждем отправки)
+        // 1. Шлем вопрос пользователя в Telegram
         await sendToTelegram(`👤 <b>User:</b> ${message}`);
 
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
@@ -96,17 +94,22 @@ app.post('/api/message', async (req, res) => {
             assistant_id: config.openai.assistantId,
             additional_instructions: `
 Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
-IMPORTANT:
-1. Use 'saveBookingToSheet' to save bookings (Name + Phone required).
-2. If phone is missing, ASK for it.
-3. NEVER mention WhatsApp.
-4. If asked about price AND booking, give price FIRST.
+
+CRITICAL RULES FOR BOOKING:
+1. You have a function called 'saveBookingToSheet'.
+2. IF you have the user's Name AND Phone, you MUST call 'saveBookingToSheet' IMMEDIATELY.
+3. DO NOT write text like "I am saving..." or "One moment" before calling the function. CALL THE FUNCTION FIRST.
+4. DO NOT say "I have recorded your request" unless you have successfully called the function.
+5. If Name or Phone is missing, ASK for it.
+6. NEVER mention WhatsApp.
+7. If the user asks for price AND booking, provide the price first, then immediately call the function.
 `
         });
 
         let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
         const startTime = Date.now();
         let formActionData = null;
+        let toolCalled = false;
 
         while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
             if (Date.now() - startTime > 50000) {
@@ -121,11 +124,13 @@ IMPORTANT:
 
                 await Promise.all(toolCalls.map(async (toolCall) => {
                     if (toolCall.function.name === 'saveBookingToSheet') {
+                        toolCalled = true;
                         try {
                             const args = JSON.parse(toolCall.function.arguments);
+                            const cleanPhone = normalizePhone(args.phone);
                             
-                            // Уведомление о ЛИДЕ в Telegram (ждем отправки)
-                            await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${args.phone}\nService: ${args.service || 'N/A'}`);
+                            // Уведомление о попытке сохранения
+                            await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
 
                             formActionData = {
                                 type: 'FILL_FORM',
@@ -137,19 +142,35 @@ IMPORTANT:
                                 timestamp: new Date().toISOString(),
                                 source: 'Chatbot',
                                 name: args.name,
-                                phone: normalizePhone(args.phone),
+                                phone: cleanPhone,
                                 email: args.email,
                                 service: args.service,
                                 notes: `Time: ${args.time_slot || 'N/A'}`
                             };
                             
-                            const sheetResult = await appendLeadToSheet(req, leadData);
+                            // --- ПАРАЛЛЕЛЬНАЯ ОТПРАВКА (CRM + Таблица) ---
+                            
+                            // 1. Отправка в CRM (ProsBuddy / GoHighLevel)
+                            const crmPromise = sendLeadToCRM(leadData).then(res => {
+                                return res.success ? "✅ CRM Sent" : `❌ CRM Fail: ${res.error}`;
+                            });
+
+                            // 2. Отправка в Google Sheet (Резерв)
+                            const sheetPromise = appendLeadToSheet(req, leadData).then(res => {
+                                return res.success ? "✅ Sheet Saved" : `❌ Sheet Fail: ${res.error}`;
+                            });
+
+                            // Ждем оба результата (чтобы бот не завис, если один сервис медленный)
+                            const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
+
+                            // Отчет в Telegram о статусе сохранения
+                            await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
                             
                             toolOutputs.push({
                                 tool_call_id: toolCall.id,
                                 output: JSON.stringify({ 
-                                    status: sheetResult.success ? 'OK' : 'Error', 
-                                    message: sheetResult.success ? 'Saved successfully.' : 'Failed to save.'
+                                    status: 'OK', 
+                                    message: 'Saved successfully.' 
                                 })
                             });
                         } catch (err) {
@@ -177,7 +198,14 @@ IMPORTANT:
                     .replace(/\[\d+:\d+†[^\]]+\]/g, '')
                     .trim();
 
-                // 2. Шлем ответ бота в Telegram (ВАЖНО: ждем отправки)
+                // Детектор лжи
+                const lowerText = text.toLowerCase();
+                const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') || lowerText.includes('booked') || lowerText.includes('saved');
+                
+                if (botClaimsSave && !toolCalled) {
+                    await sendToTelegram(`⚠️ <b>WARNING:</b> Бот сказал "Записал", но НЕ вызвал функцию.`);
+                }
+
                 await sendToTelegram(`🤖 <b>Bot:</b> ${text}`);
 
                 res.json({ message: text, action: formActionData });
