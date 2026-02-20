@@ -213,12 +213,43 @@ async function uploadFileToConversation(contactId, base64Data, fileName, mimeTyp
 }
 
 /**
+ * Search for an existing conversation for a contact.
+ * Returns the conversationId or null.
+ */
+async function findConversation(contactId) {
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    if (!apiKey || !locationId) return null;
+
+    try {
+        const response = await fetch(
+            `${GHL_API}/conversations/search?contactId=${contactId}&locationId=${locationId}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Version': '2021-07-28',
+                },
+            }
+        );
+        const data = await response.json();
+        // Prefer the phone/SMS conversation
+        const convs = data.conversations || [];
+        const smsConv = convs.find(c =>
+            c.type === 'TYPE_PHONE' || c.lastMessageType === 'TYPE_SMS'
+        );
+        return smsConv?.id || convs[0]?.id || null;
+    } catch (err) {
+        logger.error('Find conversation error', err);
+        return null;
+    }
+}
+
+/**
  * Send a Live_Chat message into the contact's conversation thread.
  * Uses POST /conversations/messages with type "Live_Chat".
- * This makes the message + photos appear directly in the chat view,
- * similar to how Yelp / Thumbtack messages appear.
+ * If conversationId is provided, sends to that specific thread.
  */
-async function sendLiveChatMessage(contactId, text, attachmentUrls) {
+async function sendLiveChatMessage(contactId, text, attachmentUrls, conversationId) {
     const apiKey = process.env.PROSBUDDY_API_TOKEN;
     if (!apiKey) return null;
 
@@ -228,6 +259,11 @@ async function sendLiveChatMessage(contactId, text, attachmentUrls) {
             contactId: contactId,
             message: text || '',
         };
+
+        // Send to existing conversation if we found one
+        if (conversationId) {
+            payload.conversationId = conversationId;
+        }
 
         if (attachmentUrls && attachmentUrls.length > 0) {
             payload.attachments = attachmentUrls;
@@ -356,8 +392,19 @@ async function handleQuoteSubmission(req, res) {
         }
 
         // --- Step 3: Send Live_Chat message with quote details + photos ---
+        // Wait a moment for GHL workflow to create the SMS conversation,
+        // then find it and send our message to the same thread.
         let _liveChatResult = null;
         if (contactId) {
+            // Small delay to let GHL workflow create the SMS conversation first
+            await new Promise(resolve => setTimeout(resolve, 3000));
+
+            // Find the existing conversation (SMS thread)
+            let existingConvId = null;
+            try {
+                existingConvId = await findConversation(contactId);
+            } catch (e) { /* ignore */ }
+
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
             msgParts.push(`👤 ${name}`);
@@ -369,7 +416,13 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                _liveChatResult = await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
+                _liveChatResult = await sendLiveChatMessage(
+                    contactId,
+                    msgParts.join('\n'),
+                    photoUrls,
+                    existingConvId  // pass the existing conversation ID
+                );
+                if (_liveChatResult) _liveChatResult.existingConvId = existingConvId;
             } catch (msgErr) {
                 _liveChatResult = { error: msgErr.message };
                 logger.error('Live_Chat message failed (non-critical)', msgErr);
