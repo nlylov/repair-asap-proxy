@@ -318,6 +318,7 @@ async function handleQuoteSubmission(req, res) {
 
         // --- Step 2: Upload photos to conversation (if any) ---
         let photoUrls = [];
+        let _uploadResults = [];
 
         if (contactId && photos && Array.isArray(photos) && photos.length > 0) {
             const maxPhotos = Math.min(photos.length, 5);
@@ -337,12 +338,14 @@ async function handleQuoteSubmission(req, res) {
             });
 
             const results = await Promise.allSettled(uploadPromises);
+            _uploadResults = results.map(r => ({ status: r.status, value: r.value, reason: r.reason?.message }));
             photoUrls = results
                 .filter(r => r.status === 'fulfilled' && r.value?.url)
                 .map(r => r.value.url);
         }
 
         // --- Step 3: Send Live_Chat message with quote details + photos ---
+        let _liveChatResult = null;
         if (contactId) {
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
@@ -355,9 +358,9 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                const liveChatResult = await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
-                logger.info('Live_Chat result', liveChatResult);
+                _liveChatResult = await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
             } catch (msgErr) {
+                _liveChatResult = { error: msgErr.message };
                 logger.error('Live_Chat message failed (non-critical)', msgErr);
             }
         }
@@ -377,7 +380,7 @@ async function handleQuoteSubmission(req, res) {
         return res.json({
             success: true,
             message: 'Quote request received successfully',
-            _debug: { contactId, photoUrls }
+            _debug: { contactId, photoUrls, uploadResults: _uploadResults, liveChatResult: _liveChatResult }
         });
 
     } catch (error) {
