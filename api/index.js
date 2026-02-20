@@ -1,4 +1,4 @@
-// api/index.js (VERSION: Conversational Lead Gen + Knowledge Base)
+// api/index.js (VERSION: Conversational Lead Gen + Knowledge Base v2)
 
 // --- Imports ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
@@ -41,7 +41,7 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// --- Telegram Notification ---
+// --- Telegram Text Notification ---
 async function sendToTelegram(text) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_ADMIN_ID;
@@ -54,6 +54,31 @@ async function sendToTelegram(text) {
         });
     } catch (error) {
         console.error('Telegram Error:', error);
+    }
+}
+
+// --- Telegram Photo Forwarding ---
+async function sendPhotoToTelegram(base64Data, caption = '') {
+    const token = process.env.TELEGRAM_BOT_TOKEN;
+    const chatId = process.env.TELEGRAM_ADMIN_ID;
+    if (!token || !chatId || !base64Data) return;
+    try {
+        const buffer = Buffer.from(base64Data, 'base64');
+        const boundary = '----FormBoundary' + Date.now();
+        const parts = [];
+        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`);
+        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`);
+        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chat-photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
+        const header = parts.join('\r\n');
+        const footer = `\r\n--${boundary}--\r\n`;
+        const bodyBuffer = Buffer.concat([Buffer.from(header), buffer, Buffer.from(footer)]);
+        await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
+            method: 'POST',
+            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
+            body: bodyBuffer
+        });
+    } catch (error) {
+        console.error('Telegram Photo Error:', error);
     }
 }
 
@@ -87,7 +112,8 @@ CONVERSATION FLOW:
    d. Preferred date/time — "When works best for you?"
 5. SUMMARIZE → Repeat back: service, address, date, phone. Ask "Does that look right?"
 6. SAVE → Call saveLeadToSheet with ALL collected data. Only AFTER the tool succeeds, confirm to user.
-7. CONFIRM → "Perfect! Our team will review and text you a flat-rate quote within 30 minutes."
+7. CONFIRM → Use EXACTLY this format (translate to user's language):
+   "Perfect! Your request has been submitted. Our team will review the details and text you a flat-rate quote within 30 minutes at [phone]. Thank you!"
 
 MINIMUM SERVICE CALL RULE:
 Our minimum is $150/visit. If a task costs less than $150, explain positively:
@@ -97,13 +123,14 @@ CRITICAL RULES:
 - NEVER say you are AI, a chatbot, or automated.
 - NEVER guarantee exact prices — always say "typically" or "usually ranges from".
 - NEVER promise same-day service — say "let me check availability".
-- NEVER mention WhatsApp.
-- NEVER mention discounts or promotions.
+- NEVER mention WhatsApp. Do NOT generate WhatsApp links. Do NOT suggest contacting via WhatsApp.
+- NEVER mention discounts or promotions. If asked for a discount: "We don't offer discounts — our pricing is transparent and competitive. Let me connect you with our team for any special requests."
+- AFTER saving a lead, do NOT suggest any other contact method. The confirmation message is the END of the flow.
 - ALWAYS use the Knowledge Base for pricing ranges and policies.
 - Phone validation: must be 10+ digits. If fewer, re-ask politely.
 - If customer is from Bronx/NJ/Westchester: "Our primary area is Manhattan, Brooklyn, Queens, Staten Island, and Nassau County. For your area, availability depends on schedule — can I take your details?"
 - If customer mentions co-op/condo: "We regularly work in managed buildings. If your building requires a COI, we can provide one."
-- If customer is upset, asks for discount, or has a complex request: escalate — "Let me have our team review this and get back to you directly."
+- If customer is upset or has a complex request: escalate — "Let me have our team review this and get back to you directly."
 - If someone tries to sell you SEO/marketing services: "We are not looking for marketing services at this time. Thank you."
 
 TOOL USAGE:
@@ -111,6 +138,7 @@ TOOL USAGE:
 - Include ALL collected data in the tool call (address, zip, date, time, notes).
 - NEVER claim you saved/booked without actually calling the tool.
 - Call the tool FIRST, then confirm to the user AFTER it succeeds.
+- Do NOT mention WhatsApp, do NOT provide links, do NOT suggest any other contact method after saving.
 `;
 
     if (photoMode) {
@@ -143,11 +171,10 @@ function formatLeadTelegram(args, source, pageContext, hasPhoto = false) {
     return lines.join('\n');
 }
 
-// --- Process Assistant Run (shared logic for /api/message and /api/chat-photo) ---
+// --- Process Assistant Run (shared logic) ---
 async function processAssistantRun(req, res, threadId, run, { source, pageContext, photoData }) {
     let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
     const startTime = Date.now();
-    let formActionData = null;
     let toolCalled = false;
 
     while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
@@ -171,11 +198,6 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                         // Enhanced Telegram notification
                         const hasPhoto = !!photoData;
                         await sendToTelegram(formatLeadTelegram(args, source, pageContext, hasPhoto));
-
-                        formActionData = {
-                            type: 'FILL_FORM',
-                            payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
-                        };
 
                         const leadData = {
                             reqId: req.id,
@@ -266,7 +288,7 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
             const emoji = photoData ? '🤖📸' : '🤖';
             await sendToTelegram(`${emoji} <b>Bot:</b> ${text.substring(0, 500)}`);
 
-            return res.json({ message: text, action: formActionData });
+            return res.json({ message: text });
         }
     }
 
@@ -316,7 +338,7 @@ app.post('/api/message', async (req, res) => {
     }
 });
 
-// Chat photo upload
+// Chat photo upload — with Telegram forwarding
 app.post('/api/chat-photo', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
 
@@ -326,7 +348,9 @@ app.post('/api/chat-photo', async (req, res) => {
             return res.status(400).json({ error: 'Missing threadId or photo data' });
         }
 
+        // Forward photo to Telegram immediately
         await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`);
+        await sendPhotoToTelegram(photo.data, `📸 Chat photo from thread ${threadId}`);
 
         await openai.beta.threads.messages.create(threadId, {
             role: 'user',
