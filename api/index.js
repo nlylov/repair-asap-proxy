@@ -46,7 +46,7 @@ async function sendToTelegram(text) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_ADMIN_ID;
 
-    if (!token || !chatId) return; 
+    if (!token || !chatId) return;
 
     try {
         const url = `https://api.telegram.org/bot${token}/sendMessage`;
@@ -56,7 +56,7 @@ async function sendToTelegram(text) {
             body: JSON.stringify({
                 chat_id: chatId,
                 text: text,
-                parse_mode: 'HTML' 
+                parse_mode: 'HTML'
             })
         });
     } catch (error) {
@@ -69,11 +69,11 @@ async function sendToTelegram(text) {
 app.post('/api/thread', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
     try {
-      const thread = await openai.beta.threads.create();
-      await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
-      res.json({ threadId: thread.id });
+        const thread = await openai.beta.threads.create();
+        await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
+        res.json({ threadId: thread.id });
     } catch (error) {
-      res.status(500).json({ error: 'Failed to create thread' });
+        res.status(500).json({ error: 'Failed to create thread' });
     }
 });
 
@@ -115,7 +115,7 @@ MANDATORY PROTOCOL:
 
         while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
             if (Date.now() - startTime > 50000) {
-                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch(e) {}
+                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
                 await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
                 return res.status(504).json({ error: 'Timeout' });
             }
@@ -130,7 +130,7 @@ MANDATORY PROTOCOL:
                         try {
                             const args = JSON.parse(toolCall.function.arguments);
                             const cleanPhone = normalizePhone(args.phone);
-                            
+
                             await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
 
                             formActionData = {
@@ -148,14 +148,14 @@ MANDATORY PROTOCOL:
                                 service: args.service,
                                 notes: `Time: ${args.time_slot || 'N/A'}`
                             };
-                            
+
                             // --- ПАРАЛЛЕЛЬНАЯ ОТПРАВКА (CRM + Таблица) ---
                             const crmPromise = sendLeadToCRM(leadData).then(res => res.success ? "✅ CRM Sent" : `❌ CRM Fail: ${res.error}`);
                             const sheetPromise = appendLeadToSheet(req, leadData).then(res => res.success ? "✅ Sheet Saved" : `❌ Sheet Fail: ${res.error}`);
 
                             const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
                             await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
-                            
+
                             toolOutputs.push({
                                 tool_call_id: toolCall.id,
                                 output: JSON.stringify({ status: 'OK', message: 'Saved successfully.' })
@@ -178,7 +178,7 @@ MANDATORY PROTOCOL:
         if (runStatus.status === 'completed') {
             const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
             const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
-            
+
             if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
                 const text = assistantMessage.content[0].text.value
                     .replace(/【.*?】/g, '')
@@ -188,7 +188,7 @@ MANDATORY PROTOCOL:
                 // Улучшенный детектор лжи
                 const lowerText = text.toLowerCase();
                 const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') || lowerText.includes('оформил') || lowerText.includes('зарегистрировал') || lowerText.includes('booked') || lowerText.includes('saved');
-                
+
                 if (botClaimsSave && !toolCalled) {
                     await sendToTelegram(`⚠️ <b>WARNING:</b> Бот сказал "Записал", но НЕ вызвал функцию.`);
                 }
@@ -208,6 +208,10 @@ MANDATORY PROTOCOL:
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
+
+// --- ROUTE: Quote Form Submission ---
+const handleQuoteSubmission = require('./quote');
+app.post('/api/quote', handleQuoteSubmission);
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
