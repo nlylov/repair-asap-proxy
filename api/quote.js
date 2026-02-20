@@ -137,6 +137,7 @@ async function handleQuoteSubmission(req, res) {
             email: email || '',
             service: service || 'Not specified',
             notes: noteParts.join('\n\n'),
+            tags: ['quote-form', 'website-lead'],
         };
 
         const crmResult = await sendLeadToCRM(leadData);
