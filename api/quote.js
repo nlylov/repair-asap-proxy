@@ -355,7 +355,8 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
+                const liveChatResult = await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
+                logger.info('Live_Chat result', liveChatResult);
             } catch (msgErr) {
                 logger.error('Live_Chat message failed (non-critical)', msgErr);
             }
@@ -375,7 +376,8 @@ async function handleQuoteSubmission(req, res) {
         });
         return res.json({
             success: true,
-            message: 'Quote request received successfully'
+            message: 'Quote request received successfully',
+            _debug: { contactId, photoUrls }
         });
 
     } catch (error) {
