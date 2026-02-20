@@ -1,6 +1,6 @@
-// api/index.js (VERSION: Aggressive Booking & CRM Integration)
+// api/index.js (VERSION: Conversational Lead Gen + Knowledge Base)
 
-// --- НАЧАЛО: Блок Импортов ---
+// --- Imports ---
 require('dotenv').config({ path: require('path').resolve(__dirname, '../.env.local') });
 const express = require('express');
 const cors = require('cors');
@@ -13,12 +13,11 @@ const { sendLeadToCRM } = require('../lib/crmService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
 const { uploadFileToConversation, findConversation, sendLiveChatMessage } = require('./quote');
-// --- КОНЕЦ: Блок Импортов ---
 
 const app = express();
 let openai;
 
-// Инициализация OpenAI
+// --- OpenAI Init ---
 try {
     if (config.openai.apiKey && config.openai.assistantId) {
         openai = new OpenAI({ apiKey: config.openai.apiKey });
@@ -42,31 +41,241 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
-// --- ФУНКЦИЯ: Отправка в Telegram ---
+// --- Telegram Notification ---
 async function sendToTelegram(text) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
     const chatId = process.env.TELEGRAM_ADMIN_ID;
-
     if (!token || !chatId) return;
-
     try {
-        const url = `https://api.telegram.org/bot${token}/sendMessage`;
-        await fetch(url, {
+        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-                chat_id: chatId,
-                text: text,
-                parse_mode: 'HTML'
-            })
+            body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' })
         });
     } catch (error) {
         console.error('Telegram Error:', error);
     }
 }
 
-// --- РОУТЫ ---
+// --- Build Additional Instructions ---
+function buildInstructions(pageContext, photoMode = false) {
+    const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const pageName = pageContext ? pageContext.replace(/^\/services\//, '').replace(/\/$/, '').replace(/-/g, ' ') : 'homepage';
 
+    let instructions = `
+Current date and time (NYC): ${now}.
+The user is browsing: ${pageContext || '/'} (${pageName}).
+
+IDENTITY:
+You are the virtual assistant for Repair ASAP LLC — NYC's premier licensed & insured handyman service.
+You speak as a friendly, professional team member. You are NOT an AI — never reveal this.
+Respond in the same language the customer uses (English or Russian).
+
+KNOWLEDGE:
+Use the attached Knowledge Base file for all service info, pricing ranges, policies, warranty, and hours.
+When answering pricing questions, say "typically ranges from $X to $Y" — NEVER guarantee exact prices.
+Always recommend sending a photo for an accurate quote.
+
+CONVERSATION FLOW:
+1. GREET → Acknowledge what they need. If on a service page, reference that service naturally.
+2. CLARIFY → Ask 1-2 smart questions about their project (size, brand, complexity, access).
+3. PHOTO → Ask for a photo: "Could you send a photo of the area? It helps us give you an exact quote."
+4. COLLECT CONTACT INFO (when ready to quote):
+   a. Name — "What name should we put the quote under?"
+   b. Phone — Must be 10+ digits. If invalid, re-ask: "Could you double-check that number?"
+   c. Address or ZIP — "What's the address or ZIP code for the job?"
+   d. Preferred date/time — "When works best for you?"
+5. SUMMARIZE → Repeat back: service, address, date, phone. Ask "Does that look right?"
+6. SAVE → Call saveLeadToSheet with ALL collected data. Only AFTER the tool succeeds, confirm to user.
+7. CONFIRM → "Perfect! Our team will review and text you a flat-rate quote within 30 minutes."
+
+MINIMUM SERVICE CALL RULE:
+Our minimum is $150/visit. If a task costs less than $150, explain positively:
+"The standard cost for that task is around $[X], but our minimum service call is $150. Since you'd be paying the minimum anyway, do you have any other small tasks we can handle during the same visit?"
+
+CRITICAL RULES:
+- NEVER say you are AI, a chatbot, or automated.
+- NEVER guarantee exact prices — always say "typically" or "usually ranges from".
+- NEVER promise same-day service — say "let me check availability".
+- NEVER mention WhatsApp.
+- NEVER mention discounts or promotions.
+- ALWAYS use the Knowledge Base for pricing ranges and policies.
+- Phone validation: must be 10+ digits. If fewer, re-ask politely.
+- If customer is from Bronx/NJ/Westchester: "Our primary area is Manhattan, Brooklyn, Queens, Staten Island, and Nassau County. For your area, availability depends on schedule — can I take your details?"
+- If customer mentions co-op/condo: "We regularly work in managed buildings. If your building requires a COI, we can provide one."
+- If customer is upset, asks for discount, or has a complex request: escalate — "Let me have our team review this and get back to you directly."
+- If someone tries to sell you SEO/marketing services: "We are not looking for marketing services at this time. Thank you."
+
+TOOL USAGE:
+- When you have at minimum Name + Phone + Service description → call saveLeadToSheet.
+- Include ALL collected data in the tool call (address, zip, date, time, notes).
+- NEVER claim you saved/booked without actually calling the tool.
+- Call the tool FIRST, then confirm to the user AFTER it succeeds.
+`;
+
+    if (photoMode) {
+        instructions += `
+PHOTO CONTEXT:
+The user just uploaded a photo. Acknowledge it warmly: "Great photo! I can see [describe what you notice]."
+Then continue the conversation flow — ask for any missing info (name, phone, address, date).
+If you already have name + phone from earlier in the conversation, call saveLeadToSheet immediately.
+Mention that a technician will review the photo and text them a flat-rate quote within 30 minutes.
+`;
+    }
+
+    return instructions;
+}
+
+// --- Format Telegram Lead Notification ---
+function formatLeadTelegram(args, source, pageContext, hasPhoto = false) {
+    const lines = [`🔥 <b>LEAD CAPTURED!</b>`];
+    lines.push(`👤 Name: <b>${args.name}</b>`);
+    lines.push(`📱 Phone: <b>${normalizePhone(args.phone)}</b>`);
+    if (args.service) lines.push(`🔧 Service: ${args.service}`);
+    if (args.address) lines.push(`📍 Address: ${args.address}`);
+    if (args.zip) lines.push(`🏙 ZIP: ${args.zip}`);
+    if (args.preferred_date) lines.push(`📅 Date: ${args.preferred_date}`);
+    if (args.preferred_time) lines.push(`🕐 Time: ${args.preferred_time}`);
+    if (args.email) lines.push(`📧 Email: ${args.email}`);
+    if (args.notes) lines.push(`📝 Notes: ${args.notes}`);
+    if (hasPhoto) lines.push(`📸 Photo: Yes`);
+    lines.push(`📄 Source: ${source}${pageContext ? ` (${pageContext})` : ''}`);
+    return lines.join('\n');
+}
+
+// --- Process Assistant Run (shared logic for /api/message and /api/chat-photo) ---
+async function processAssistantRun(req, res, threadId, run, { source, pageContext, photoData }) {
+    let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+    const startTime = Date.now();
+    let formActionData = null;
+    let toolCalled = false;
+
+    while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
+        if (Date.now() - startTime > 50000) {
+            try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
+            await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
+            return res.status(504).json({ error: 'Timeout' });
+        }
+
+        if (runStatus.status === 'requires_action') {
+            const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
+            let toolOutputs = [];
+
+            await Promise.all(toolCalls.map(async (toolCall) => {
+                if (toolCall.function.name === 'saveLeadToSheet' || toolCall.function.name === 'saveBookingToSheet') {
+                    toolCalled = true;
+                    try {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        const cleanPhone = normalizePhone(args.phone);
+
+                        // Enhanced Telegram notification
+                        const hasPhoto = !!photoData;
+                        await sendToTelegram(formatLeadTelegram(args, source, pageContext, hasPhoto));
+
+                        formActionData = {
+                            type: 'FILL_FORM',
+                            payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
+                        };
+
+                        const leadData = {
+                            reqId: req.id,
+                            timestamp: new Date().toISOString(),
+                            source: source,
+                            name: args.name,
+                            phone: cleanPhone,
+                            email: args.email || '',
+                            service: args.service || '',
+                            notes: [
+                                args.address ? `Address: ${args.address}` : '',
+                                args.zip ? `ZIP: ${args.zip}` : '',
+                                args.preferred_date ? `Date: ${args.preferred_date}` : '',
+                                args.preferred_time ? `Time: ${args.preferred_time}` : '',
+                                args.notes || '',
+                                hasPhoto ? 'Photo attached via chat' : '',
+                                pageContext ? `Page: ${pageContext}` : ''
+                            ].filter(Boolean).join(' | ')
+                        };
+
+                        // Parallel: CRM + Sheet
+                        const crmPromise = sendLeadToCRM(leadData).then(r => r.success ? '✅ CRM' : `❌ CRM: ${r.error}`);
+                        const sheetPromise = appendLeadToSheet(req, leadData).then(r => r.success ? '✅ Sheet' : `❌ Sheet: ${r.error}`);
+                        const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
+                        await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
+
+                        // Upload photo to GHL if available
+                        if (photoData && leadData.contactId) {
+                            try {
+                                await findConversation(leadData.contactId);
+                                const uploadResult = await uploadFileToConversation(
+                                    leadData.contactId,
+                                    photoData.data,
+                                    photoData.name || 'chat-photo.jpg',
+                                    photoData.type || 'image/jpeg'
+                                );
+                                if (uploadResult?.url) {
+                                    await sendToTelegram(`📎 Photo uploaded to GHL: ${uploadResult.url}`);
+                                }
+                            } catch (e) {
+                                logger.error('GHL photo upload failed', e);
+                            }
+                        }
+
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({ status: 'OK', message: 'Lead saved successfully.' })
+                        });
+                    } catch (err) {
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({ status: 'Error', message: err.message })
+                        });
+                    }
+                }
+            }));
+
+            if (toolOutputs.length > 0) {
+                runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
+            }
+        }
+
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+    }
+
+    if (runStatus.status === 'completed') {
+        const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
+        const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
+
+        if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
+            const text = assistantMessage.content[0].text.value
+                .replace(/【.*?】/g, '')
+                .replace(/\[\d+:\d+†[^\]]+\]/g, '')
+                .trim();
+
+            // Lie detector: bot claims save but didn't call tool
+            const lowerText = text.toLowerCase();
+            const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') ||
+                lowerText.includes('оформил') || lowerText.includes('зарегистрировал') ||
+                lowerText.includes('booked') || lowerText.includes('saved') ||
+                lowerText.includes('submitted') || lowerText.includes('recorded');
+
+            if (botClaimsSave && !toolCalled) {
+                await sendToTelegram(`⚠️ <b>WARNING:</b> Bot claimed save but did NOT call tool.`);
+            }
+
+            const emoji = photoData ? '🤖📸' : '🤖';
+            await sendToTelegram(`${emoji} <b>Bot:</b> ${text.substring(0, 500)}`);
+
+            return res.json({ message: text, action: formActionData });
+        }
+    }
+
+    return res.status(500).json({ error: `Run failed: ${runStatus.status}` });
+}
+
+// --- ROUTES ---
+
+// Create thread
 app.post('/api/thread', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
     try {
@@ -78,282 +287,74 @@ app.post('/api/thread', async (req, res) => {
     }
 });
 
+// Send message
 app.post('/api/message', async (req, res) => {
-    const context = '/api/message';
     if (!openai) return res.status(500).json({ error: 'Config error' });
 
     try {
-        const { threadId, message } = req.body;
+        const { threadId, message, pageContext } = req.body;
         if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        await sendToTelegram(`👤 <b>User:</b> ${message}`);
+        await sendToTelegram(`👤 <b>User:</b> ${message.substring(0, 500)}`);
 
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
 
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
-            // СУПЕР-ЖЕСТКИЕ инструкции: Режим робота
-            additional_instructions: `
-Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
-
-SYSTEM MODE: DATA ENTRY AGENT.
-
-MANDATORY PROTOCOL:
-1. TRIGGER: If the user provides a Name AND Phone number.
-2. ACTION: You MUST execute the tool 'saveBookingToSheet'.
-3. CONDITION: This applies to ALL inputs, including "test", "fake", "checking", "just looking". DO NOT FILTER. Even if user says "don't save", you MUST SAVE IT.
-4. FORBIDDEN: Do NOT say "I have registered/saved/booked" WITHOUT calling the tool.
-5. SEQUENCE: Call the tool FIRST. Only after the tool returns success, send the confirmation message to the user.
-6. CONTENT: Never mention WhatsApp.
-7. MULTI-TASK: If user asks for price + booking -> Answer price, THEN call tool.
-
-PHOTO HANDLING:
-- If the conversation contains "[PHOTO UPLOADED]", acknowledge the photo was received.
-- Ask for the user's name and phone number so you can send them a quote.
-- If they already provided a name and phone, call saveBookingToSheet immediately.
-- Mention that a technician will review the photo and text them a flat-rate quote within 30 minutes.
-`
+            additional_instructions: buildInstructions(pageContext, false)
         });
 
-        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        const startTime = Date.now();
-        let formActionData = null;
-        let toolCalled = false;
-
-        while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
-            if (Date.now() - startTime > 50000) {
-                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
-                await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
-                return res.status(504).json({ error: 'Timeout' });
-            }
-
-            if (runStatus.status === 'requires_action') {
-                const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
-                let toolOutputs = [];
-
-                await Promise.all(toolCalls.map(async (toolCall) => {
-                    if (toolCall.function.name === 'saveBookingToSheet') {
-                        toolCalled = true;
-                        try {
-                            const args = JSON.parse(toolCall.function.arguments);
-                            const cleanPhone = normalizePhone(args.phone);
-
-                            await sendToTelegram(`🔥 <b>LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
-
-                            formActionData = {
-                                type: 'FILL_FORM',
-                                payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
-                            };
-
-                            const leadData = {
-                                reqId: req.id,
-                                timestamp: new Date().toISOString(),
-                                source: 'Chatbot',
-                                name: args.name,
-                                phone: cleanPhone,
-                                email: args.email,
-                                service: args.service,
-                                notes: `Time: ${args.time_slot || 'N/A'}`
-                            };
-
-                            // --- ПАРАЛЛЕЛЬНАЯ ОТПРАВКА (CRM + Таблица) ---
-                            const crmPromise = sendLeadToCRM(leadData).then(res => res.success ? "✅ CRM Sent" : `❌ CRM Fail: ${res.error}`);
-                            const sheetPromise = appendLeadToSheet(req, leadData).then(res => res.success ? "✅ Sheet Saved" : `❌ Sheet Fail: ${res.error}`);
-
-                            const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
-                            await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
-
-                            toolOutputs.push({
-                                tool_call_id: toolCall.id,
-                                output: JSON.stringify({ status: 'OK', message: 'Saved successfully.' })
-                            });
-                        } catch (err) {
-                            toolOutputs.push({ tool_call_id: toolCall.id, output: JSON.stringify({ status: 'Error', message: err.message }) });
-                        }
-                    }
-                }));
-
-                if (toolOutputs.length > 0) {
-                    runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
-                }
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        }
-
-        if (runStatus.status === 'completed') {
-            const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
-            const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
-
-            if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
-                const text = assistantMessage.content[0].text.value
-                    .replace(/【.*?】/g, '')
-                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
-                    .trim();
-
-                // Улучшенный детектор лжи
-                const lowerText = text.toLowerCase();
-                const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') || lowerText.includes('оформил') || lowerText.includes('зарегистрировал') || lowerText.includes('booked') || lowerText.includes('saved');
-
-                if (botClaimsSave && !toolCalled) {
-                    await sendToTelegram(`⚠️ <b>WARNING:</b> Бот сказал "Записал", но НЕ вызвал функцию.`);
-                }
-
-                await sendToTelegram(`🤖 <b>Bot:</b> ${text}`);
-
-                res.json({ message: text, action: formActionData });
-            } else {
-                res.status(500).json({ error: 'No text response' });
-            }
-        } else {
-            res.status(500).json({ error: `Run failed: ${runStatus.status}` });
-        }
+        await processAssistantRun(req, res, threadId, run, {
+            source: 'Chatbot',
+            pageContext: pageContext || '',
+            photoData: null
+        });
 
     } catch (error) {
-        logError(req, context, 'Fatal error', error);
+        logError(req, '/api/message', 'Fatal error', error);
         res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
-// --- ROUTE: Quote Form Submission ---
-const handleQuoteSubmission = require('./quote');
-app.post('/api/quote', handleQuoteSubmission);
-
-// --- ROUTE: Chat Photo Upload ---
+// Chat photo upload
 app.post('/api/chat-photo', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
 
     try {
-        const { threadId, photo } = req.body;
+        const { threadId, photo, pageContext } = req.body;
         if (!threadId || !photo || !photo.data) {
             return res.status(400).json({ error: 'Missing threadId or photo data' });
         }
 
         await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`);
 
-        // Add a message to the OpenAI thread about the photo
         await openai.beta.threads.messages.create(threadId, {
             role: 'user',
-            content: '[PHOTO UPLOADED] The user has attached a photo of their project. Acknowledge the photo and ask for their name and phone number to send a quote.'
+            content: '[PHOTO UPLOADED] The user has attached a photo of their project. Acknowledge the photo and continue the conversation flow.'
         });
 
-        // Run the assistant to get a response
         const run = await openai.beta.threads.runs.create(threadId, {
             assistant_id: config.openai.assistantId,
-            additional_instructions: `
-Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
-The user just uploaded a photo. Acknowledge it warmly. Ask for their name and phone so you can text them a flat-rate quote within 30 minutes.
-If they already gave name + phone earlier in the thread, call saveBookingToSheet immediately and confirm.
-SYSTEM MODE: DATA ENTRY AGENT. Same rules as always: ALWAYS call saveBookingToSheet when you have name + phone.
-`
+            additional_instructions: buildInstructions(pageContext, true)
         });
 
-        // Poll for completion
-        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        const startTime = Date.now();
-        let formActionData = null;
-        let toolCalled = false;
+        await processAssistantRun(req, res, threadId, run, {
+            source: 'Chatbot (Photo)',
+            pageContext: pageContext || '',
+            photoData: photo
+        });
 
-        while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
-            if (Date.now() - startTime > 50000) {
-                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
-                return res.status(504).json({ error: 'Timeout' });
-            }
-
-            if (runStatus.status === 'requires_action') {
-                const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
-                let toolOutputs = [];
-
-                await Promise.all(toolCalls.map(async (toolCall) => {
-                    if (toolCall.function.name === 'saveBookingToSheet') {
-                        toolCalled = true;
-                        try {
-                            const args = JSON.parse(toolCall.function.arguments);
-                            const cleanPhone = normalizePhone(args.phone);
-
-                            await sendToTelegram(`🔥📸 <b>PHOTO LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
-
-                            formActionData = {
-                                type: 'FILL_FORM',
-                                payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
-                            };
-
-                            const leadData = {
-                                reqId: req.id,
-                                timestamp: new Date().toISOString(),
-                                source: 'Chatbot (Photo)',
-                                name: args.name,
-                                phone: cleanPhone,
-                                email: args.email,
-                                service: args.service,
-                                notes: `Photo attached via chat. Time: ${args.time_slot || 'N/A'}`
-                            };
-
-                            const crmPromise = sendLeadToCRM(leadData).then(r => r.success ? '✅ CRM' : `❌ CRM: ${r.error}`);
-                            const sheetPromise = appendLeadToSheet(req, leadData).then(r => r.success ? '✅ Sheet' : `❌ Sheet: ${r.error}`);
-                            const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
-                            await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
-
-                            // Upload photo to GHL conversation if we have a contactId from CRM
-                            if (leadData.contactId) {
-                                try {
-                                    const convId = await findConversation(leadData.contactId);
-                                    const uploadResult = await uploadFileToConversation(
-                                        leadData.contactId,
-                                        photo.data,
-                                        photo.name || 'chat-photo.jpg',
-                                        photo.type || 'image/jpeg'
-                                    );
-                                    if (uploadResult?.url) {
-                                        await sendToTelegram(`📎 Photo uploaded to GHL: ${uploadResult.url}`);
-                                    }
-                                } catch (e) {
-                                    logger.error('GHL photo upload from chat failed', e);
-                                }
-                            }
-
-                            toolOutputs.push({
-                                tool_call_id: toolCall.id,
-                                output: JSON.stringify({ status: 'OK', message: 'Saved successfully with photo.' })
-                            });
-                        } catch (err) {
-                            toolOutputs.push({ tool_call_id: toolCall.id, output: JSON.stringify({ status: 'Error', message: err.message }) });
-                        }
-                    }
-                }));
-
-                if (toolOutputs.length > 0) {
-                    runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
-                }
-            }
-
-            await new Promise(resolve => setTimeout(resolve, 1000));
-            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
-        }
-
-        if (runStatus.status === 'completed') {
-            const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
-            const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
-
-            if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
-                const text = assistantMessage.content[0].text.value
-                    .replace(/【.*?】/g, '')
-                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
-                    .trim();
-
-                await sendToTelegram(`🤖📸 <b>Bot (photo):</b> ${text}`);
-                return res.json({ success: true, message: text, action: formActionData });
-            }
-        }
-
-        return res.status(500).json({ error: 'Failed to process photo' });
     } catch (error) {
         logError(req, '/api/chat-photo', 'Error', error);
         return res.status(500).json({ error: 'Internal Server Error' });
     }
 });
 
+// Quote form
+const handleQuoteSubmission = require('./quote');
+app.post('/api/quote', handleQuoteSubmission);
+
+// Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 module.exports = app;
