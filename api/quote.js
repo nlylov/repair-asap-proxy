@@ -1,7 +1,7 @@
 // api/quote.js — Quote Form API Route for Vercel
 // Handles form submissions with optional photo uploads,
 // creates a contact in GHL CRM, creates an Opportunity in the pipeline,
-// and uploads photos to GHL Media.
+// and sends photos into the contact's Conversation thread.
 
 const { sendLeadToCRM } = require('../lib/crmService');
 const { logger } = require('../lib/utils/log');
@@ -44,7 +44,6 @@ async function getPipelineInfo() {
             return null;
         }
 
-        // Use the first pipeline, first stage ("New Lead" typically)
         const pipeline = pipelines[0];
         const firstStage = pipeline.stages?.[0];
 
@@ -127,52 +126,52 @@ async function createOpportunity(contactId, contactName, service, source) {
 }
 
 /**
- * Upload a single file (base64) to GHL Media Storage
- * Returns the file URL on success, null on failure
+ * Upload a single file to GHL Conversations via multipart upload.
+ * Uses POST /conversations/messages/upload
+ * Returns the uploaded file URL on success, null on failure.
  */
-async function uploadToGHLMedia(base64Data, fileName, mimeType) {
+async function uploadFileToConversation(contactId, base64Data, fileName, mimeType) {
     const apiKey = process.env.PROSBUDDY_API_TOKEN;
-    if (!apiKey) return null;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    if (!apiKey || !locationId) return null;
 
     try {
-        // Convert base64 to a Buffer
         const fileBuffer = Buffer.from(base64Data, 'base64');
+        const CRLF = '\r\n';
+        const boundary = '----FormBoundary' + Date.now().toString(36) + Math.random().toString(36).slice(2);
 
-        // Build multipart form data manually
-        const boundary = '----FormBoundary' + Date.now().toString(36);
-        const bodyParts = [];
+        // Build multipart body parts as buffers
+        const parts = [];
 
-        // File part
-        bodyParts.push(
-            `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="file"; filename="${fileName}"\r\n` +
-            `Content-Type: ${mimeType}\r\n\r\n`
-        );
-        bodyParts.push(fileBuffer);
-        bodyParts.push('\r\n');
+        // --- contactId field ---
+        parts.push(Buffer.from(
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="contactId"${CRLF}${CRLF}` +
+            `${contactId}${CRLF}`
+        ));
 
-        // hosted field (required by GHL)
-        bodyParts.push(
-            `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="hosted"\r\n\r\n` +
-            `true\r\n`
-        );
+        // --- locationId field ---
+        parts.push(Buffer.from(
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="locationId"${CRLF}${CRLF}` +
+            `${locationId}${CRLF}`
+        ));
 
-        // fileUrl field (name for the file)
-        bodyParts.push(
-            `--${boundary}\r\n` +
-            `Content-Disposition: form-data; name="fileUrl"\r\n\r\n` +
-            `quote-photos/${Date.now()}-${fileName}\r\n`
-        );
+        // --- file attachment ---
+        parts.push(Buffer.from(
+            `--${boundary}${CRLF}` +
+            `Content-Disposition: form-data; name="fileAttachment"; filename="${fileName}"${CRLF}` +
+            `Content-Type: ${mimeType}${CRLF}${CRLF}`
+        ));
+        parts.push(fileBuffer);
+        parts.push(Buffer.from(CRLF));
 
-        bodyParts.push(`--${boundary}--\r\n`);
+        // --- closing boundary ---
+        parts.push(Buffer.from(`--${boundary}--${CRLF}`));
 
-        // Combine into single Buffer
-        const bodyBuffer = Buffer.concat(
-            bodyParts.map(part => typeof part === 'string' ? Buffer.from(part) : part)
-        );
+        const bodyBuffer = Buffer.concat(parts);
 
-        const response = await fetch(`${GHL_API}/medias/upload-file`, {
+        const response = await fetch(`${GHL_API}/conversations/messages/upload`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
@@ -184,15 +183,73 @@ async function uploadToGHLMedia(base64Data, fileName, mimeType) {
 
         if (response.ok) {
             const data = await response.json();
-            logger.info('File uploaded to GHL Media', { fileName, url: data.url });
-            return data.url || data.fileUrl || null;
+            // GHL returns { urls: ["https://..."] } or similar
+            const url = data.urls?.[0] || data.url || data.fileUrl || null;
+            logger.info('File uploaded to conversation', { fileName, url });
+            return url;
         } else {
             const errText = await response.text();
-            logger.error('GHL Media upload failed', { status: response.status, body: errText });
+            logger.error('Conversation file upload failed', {
+                status: response.status,
+                body: errText,
+                fileName
+            });
             return null;
         }
     } catch (err) {
-        logger.error('GHL Media upload error', err);
+        logger.error('Conversation file upload error', { fileName, error: err.message });
+        return null;
+    }
+}
+
+/**
+ * Send an inbound message (with optional attachments) into a contact's
+ * Conversation thread. Uses POST /conversations/messages.
+ * type "Custom" creates an internal/inbound message visible in the chat.
+ */
+async function sendConversationMessage(contactId, text, attachmentUrls) {
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    if (!apiKey) return null;
+
+    try {
+        const payload = {
+            type: 'Custom',
+            contactId: contactId,
+            message: text || '',
+        };
+
+        if (attachmentUrls && attachmentUrls.length > 0) {
+            payload.attachments = attachmentUrls;
+        }
+
+        const response = await fetch(`${GHL_API}/conversations/messages`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            logger.info('Conversation message sent', {
+                contactId,
+                messageId: data.message?.id || data.messageId,
+                attachments: attachmentUrls?.length || 0,
+            });
+            return data;
+        } else {
+            const errText = await response.text();
+            logger.error('Conversation message failed', {
+                status: response.status,
+                body: errText,
+            });
+            return null;
+        }
+    } catch (err) {
+        logger.error('Conversation message error', err);
         return null;
     }
 }
@@ -218,40 +275,16 @@ async function handleQuoteSubmission(req, res) {
             });
         }
 
-        // Upload photos if provided (max 5, each max ~7MB base64 ≈ 5MB file)
-        let photoUrls = [];
-        if (photos && Array.isArray(photos) && photos.length > 0) {
-            const maxPhotos = Math.min(photos.length, 5);
-            const uploadPromises = photos.slice(0, maxPhotos).map((photo, i) => {
-                const { data, name: photoName, type } = photo;
-                if (!data || !type) return Promise.resolve(null);
-
-                // Validate size (~7MB base64 ≈ 5MB file)
-                if (data.length > 7 * 1024 * 1024) return Promise.resolve(null);
-
-                return uploadToGHLMedia(data, photoName || `photo-${i + 1}.jpg`, type);
-            });
-
-            const results = await Promise.allSettled(uploadPromises);
-            photoUrls = results
-                .filter(r => r.status === 'fulfilled' && r.value)
-                .map(r => r.value);
-        }
-
-        // Build notes with service details and photo URLs
+        // --- Step 1: Create / upsert contact in CRM ---
         const noteParts = [];
         noteParts.push('📋 Source: Website Quote Form');
         if (service) noteParts.push(`🔧 Service: ${service}`);
         if (date) noteParts.push(`📅 Preferred Date: ${date}`);
         if (message) noteParts.push(`💬 Message: ${message}`);
-        if (photoUrls.length > 0) {
-            noteParts.push(`📸 Photos (${photoUrls.length}):\n${photoUrls.join('\n')}`);
-        }
 
-        // Send to CRM using existing service
         const leadData = {
-            name: name,
-            phone: phone,
+            name,
+            phone,
             email: email || '',
             service: service || 'Not specified',
             notes: noteParts.join('\n\n'),
@@ -260,32 +293,75 @@ async function handleQuoteSubmission(req, res) {
 
         const crmResult = await sendLeadToCRM(leadData);
 
-        if (crmResult.success) {
-            // Extract contactId from the CRM response to create an Opportunity
-            const contactId = crmResult.contactId;
-
-            if (contactId) {
-                // Create Opportunity in pipeline (non-blocking — don't fail if this fails)
-                try {
-                    await createOpportunity(contactId, name, service, 'Website Quote Form');
-                } catch (oppErr) {
-                    logger.error('Opportunity creation failed (non-critical)', oppErr);
-                }
-            }
-
-            logger.info('Quote submission successful', {
-                name, phone, service, photoCount: photoUrls.length
-            });
-            return res.json({
-                success: true,
-                message: 'Quote request received successfully'
-            });
-        } else {
+        if (!crmResult.success) {
             logger.error('CRM submission failed', { error: crmResult.error });
             return res.status(500).json({
                 error: 'Failed to submit quote. Please try again or call us.'
             });
         }
+
+        const contactId = crmResult.contactId;
+
+        // --- Step 2: Upload photos to conversation (if any) ---
+        let photoUrls = [];
+        if (contactId && photos && Array.isArray(photos) && photos.length > 0) {
+            const maxPhotos = Math.min(photos.length, 5);
+            const uploadPromises = photos.slice(0, maxPhotos).map((photo, i) => {
+                const { data, name: photoName, type } = photo;
+                if (!data || !type) return Promise.resolve(null);
+
+                // Validate size (~7MB base64 ≈ 5MB file)
+                if (data.length > 7 * 1024 * 1024) return Promise.resolve(null);
+
+                return uploadFileToConversation(
+                    contactId,
+                    data,
+                    photoName || `photo-${i + 1}.jpg`,
+                    type
+                );
+            });
+
+            const results = await Promise.allSettled(uploadPromises);
+            photoUrls = results
+                .filter(r => r.status === 'fulfilled' && r.value)
+                .map(r => r.value);
+        }
+
+        // --- Step 3: Send conversation message with photos ---
+        if (contactId) {
+            const msgParts = [];
+            msgParts.push(`📋 New Quote Request from Website`);
+            msgParts.push(`👤 ${name}`);
+            if (service) msgParts.push(`🔧 Service: ${service}`);
+            if (date) msgParts.push(`📅 Preferred Date: ${date}`);
+            if (message) msgParts.push(`💬 "${message}"`);
+            if (photoUrls.length > 0) {
+                msgParts.push(`📸 ${photoUrls.length} photo(s) attached`);
+            }
+
+            try {
+                await sendConversationMessage(contactId, msgParts.join('\n'), photoUrls);
+            } catch (msgErr) {
+                logger.error('Conversation message failed (non-critical)', msgErr);
+            }
+        }
+
+        // --- Step 4: Create Opportunity ---
+        if (contactId) {
+            try {
+                await createOpportunity(contactId, name, service, 'Website Quote Form');
+            } catch (oppErr) {
+                logger.error('Opportunity creation failed (non-critical)', oppErr);
+            }
+        }
+
+        logger.info('Quote submission successful', {
+            name, phone, service, photoCount: photoUrls.length
+        });
+        return res.json({
+            success: true,
+            message: 'Quote request received successfully'
+        });
 
     } catch (error) {
         logger.error('Quote submission error', error);
