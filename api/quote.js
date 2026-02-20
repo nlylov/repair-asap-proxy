@@ -314,8 +314,6 @@ async function handleQuoteSubmission(req, res) {
 
         // --- Step 2: Upload photos to conversation (if any) ---
         let photoUrls = [];
-        let _debugUpload = [];
-        let _debugMsg = null;
 
         if (contactId && photos && Array.isArray(photos) && photos.length > 0) {
             const maxPhotos = Math.min(photos.length, 5);
@@ -335,17 +333,12 @@ async function handleQuoteSubmission(req, res) {
             });
 
             const results = await Promise.allSettled(uploadPromises);
-            _debugUpload = results.map(r => ({
-                status: r.status,
-                value: r.value || null,
-                reason: r.reason?.message || null,
-            }));
             photoUrls = results
                 .filter(r => r.status === 'fulfilled' && r.value?.url)
                 .map(r => r.value.url);
         }
 
-        // --- Step 3: Send conversation message with photos ---
+        // --- Step 3: Add contact note with quote details + photo URLs ---
         if (contactId) {
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
@@ -358,10 +351,9 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                _debugMsg = await addContactNote(contactId, msgParts.join('\n'), photoUrls);
+                await addContactNote(contactId, msgParts.join('\n'), photoUrls);
             } catch (msgErr) {
-                _debugMsg = { error: msgErr.message };
-                logger.error('Conversation message failed (non-critical)', msgErr);
+                logger.error('Contact note failed (non-critical)', msgErr);
             }
         }
 
@@ -379,8 +371,7 @@ async function handleQuoteSubmission(req, res) {
         });
         return res.json({
             success: true,
-            message: 'Quote request received successfully',
-            _debug: { contactId, photoUrls, uploadResults: _debugUpload, msgResult: _debugMsg },
+            message: 'Quote request received successfully'
         });
 
     } catch (error) {
