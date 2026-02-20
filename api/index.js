@@ -213,110 +213,29 @@ MANDATORY PROTOCOL:
 const handleQuoteSubmission = require('./quote');
 app.post('/api/quote', handleQuoteSubmission);
 
-// --- TEMP: Debug GHL Conversations ---
-app.post('/api/_debug/conv', async (req, res) => {
-    const apiKey = process.env.PROSBUDDY_API_TOKEN;
-    const locationId = process.env.PROSBUDDY_LOCATION_ID;
-    const { contactId, type, message, attachments, conversationId } = req.body;
-
-    // Step 1: Try to find or create a conversation for this contact
-    let convId = conversationId;
-    if (!convId && contactId) {
-        try {
-            // Search for existing conversation
-            const searchRes = await fetch(`https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}&locationId=${locationId}`, {
-                headers: { 'Authorization': `Bearer ${apiKey}`, 'Version': '2021-07-28' },
-            });
-            const searchData = await searchRes.json();
-            convId = searchData.conversations?.[0]?.id || null;
-        } catch (e) { /* ignore */ }
-    }
-
-    // Step 2: Try sending message
-    const payload = {
-        type: type || 'Custom',
-        contactId,
-        message: message || 'Test from API',
-    };
-    if (attachments) payload.attachments = attachments;
-    if (convId) payload.conversationId = convId;
-
-    try {
-        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'Version': '2021-07-28',
-            },
-            body: JSON.stringify(payload),
-        });
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = text; }
-        res.json({ status: resp.status, conversationId: convId, payload, response: data });
-    } catch (err) {
-        res.json({ error: err.message });
-    }
-});
-
-// --- TEMP: Try creating inbound via different approach ---
-app.post('/api/_debug/inbound', async (req, res) => {
+// --- TEMP: Debug - test posting to existing conversation ---
+app.post('/api/_debug/conv-test', async (req, res) => {
     const apiKey = process.env.PROSBUDDY_API_TOKEN;
     const locationId = process.env.PROSBUDDY_LOCATION_ID;
     const { contactId, message, attachments } = req.body;
-
-    // Try processMessageInbound or similar
-    const payload = {
-        type: 'Custom',
-        contactId,
-        locationId,
-        direction: 'inbound',
-        message: message || 'Inbound test',
-        attachments: attachments || [],
-    };
-
     const results = {};
 
-    // Attempt 1: conversations/messages with direction
+    // Step 1: Search for all conversations for this contact
     try {
-        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'Version': '2021-07-28',
-            },
-            body: JSON.stringify(payload),
-        });
-        const text = await resp.text();
-        results.attemptMessages = { status: resp.status, body: JSON.parse(text) };
-    } catch (e) { results.attemptMessages = { error: e.message }; }
+        const searchRes = await fetch(
+            `https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}&locationId=${locationId}`,
+            { headers: { 'Authorization': `Bearer ${apiKey}`, 'Version': '2021-07-28' } }
+        );
+        const searchData = await searchRes.json();
+        results.conversations = searchData.conversations?.map(c => ({
+            id: c.id,
+            type: c.type,
+            lastMessageType: c.lastMessageType,
+            unreadCount: c.unreadCount,
+        })) || [];
+    } catch (e) { results.conversations = { error: e.message }; }
 
-    // Attempt 2: conversations/messages/inbound endpoint
-    try {
-        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages/inbound', {
-            method: 'POST',
-            headers: {
-                'Authorization': `Bearer ${apiKey}`,
-                'Content-Type': 'application/json',
-                'Version': '2021-07-28',
-            },
-            body: JSON.stringify({
-                type: 'Custom',
-                contactId,
-                locationId,
-                message: message || 'Inbound test v2',
-                attachments: attachments || [],
-            }),
-        });
-        const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = text; }
-        results.attemptInbound = { status: resp.status, body: data };
-    } catch (e) { results.attemptInbound = { error: e.message }; }
-
-    // Attempt 3: Try Live_Chat type
+    // Step 2: Try Activity type
     try {
         const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
             method: 'POST',
@@ -326,17 +245,67 @@ app.post('/api/_debug/inbound', async (req, res) => {
                 'Version': '2021-07-28',
             },
             body: JSON.stringify({
-                type: 'Live_Chat',
+                type: 'TYPE_ACTIVITY',
                 contactId,
-                message: message || 'Live Chat test',
+                message: message || 'Activity test',
                 attachments: attachments || [],
             }),
         });
         const text = await resp.text();
-        let data;
-        try { data = JSON.parse(text); } catch { data = text; }
-        results.attemptLiveChat = { status: resp.status, body: data };
-    } catch (e) { results.attemptLiveChat = { error: e.message }; }
+        let data; try { data = JSON.parse(text); } catch { data = text; }
+        results.attemptActivity = { status: resp.status, body: data };
+    } catch (e) { results.attemptActivity = { error: e.message }; }
+
+    // Step 3: Try with conversationId from existing SMS conv
+    if (results.conversations && results.conversations.length > 0) {
+        const smsConv = results.conversations.find(c =>
+            c.type === 'TYPE_PHONE' || c.lastMessageType === 'TYPE_SMS'
+        ) || results.conversations[0];
+
+        // Try adding to that conversation with Live_Chat type + conversationId
+        try {
+            const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    'Version': '2021-07-28',
+                },
+                body: JSON.stringify({
+                    type: 'Live_Chat',
+                    contactId,
+                    conversationId: smsConv.id,
+                    message: message || 'Live_Chat to SMS conv',
+                    attachments: attachments || [],
+                }),
+            });
+            const text = await resp.text();
+            let data; try { data = JSON.parse(text); } catch { data = text; }
+            results.attemptLiveChatToSms = { status: resp.status, targetConvId: smsConv.id, body: data };
+        } catch (e) { results.attemptLiveChatToSms = { error: e.message }; }
+
+        // Try SMS type with content only (no sending)
+        try {
+            const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+                method: 'POST',
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Content-Type': 'application/json',
+                    'Version': '2021-07-28',
+                },
+                body: JSON.stringify({
+                    type: 'SMS',
+                    contactId,
+                    conversationId: smsConv.id,
+                    message: message || 'SMS test',
+                    attachments: attachments || [],
+                }),
+            });
+            const text = await resp.text();
+            let data; try { data = JSON.parse(text); } catch { data = text; }
+            results.attemptSmsToConv = { status: resp.status, targetConvId: smsConv.id, body: data };
+        } catch (e) { results.attemptSmsToConv = { error: e.message }; }
+    }
 
     res.json(results);
 });
