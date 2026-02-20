@@ -213,24 +213,27 @@ async function uploadFileToConversation(contactId, base64Data, fileName, mimeTyp
 }
 
 /**
- * Add a note to a contact with quote request details and photo URLs.
- * Uses POST /contacts/{contactId}/notes — no conversation provider needed.
- * Also sends an inbound Custom message with photos if possible.
+ * Send a Live_Chat message into the contact's conversation thread.
+ * Uses POST /conversations/messages with type "Live_Chat".
+ * This makes the message + photos appear directly in the chat view,
+ * similar to how Yelp / Thumbtack messages appear.
  */
-async function addContactNote(contactId, text, attachmentUrls) {
+async function sendLiveChatMessage(contactId, text, attachmentUrls) {
     const apiKey = process.env.PROSBUDDY_API_TOKEN;
     if (!apiKey) return null;
 
     try {
-        // Build note body with photo URLs as clickable links
-        let noteBody = text;
+        const payload = {
+            type: 'Live_Chat',
+            contactId: contactId,
+            message: text || '',
+        };
+
         if (attachmentUrls && attachmentUrls.length > 0) {
-            noteBody += '\n\n📸 Photos:\n' + attachmentUrls.join('\n');
+            payload.attachments = attachmentUrls;
         }
 
-        const payload = { body: noteBody };
-
-        const response = await fetch(`${GHL_API}/contacts/${contactId}/notes`, {
+        const response = await fetch(`${GHL_API}/conversations/messages`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
@@ -245,21 +248,22 @@ async function addContactNote(contactId, text, attachmentUrls) {
         try { respData = JSON.parse(respText); } catch { respData = respText; }
 
         if (response.ok) {
-            logger.info('Contact note added', {
+            logger.info('Live_Chat message sent to conversation', {
                 contactId,
-                noteId: respData?.note?.id,
+                conversationId: respData.conversationId,
+                messageId: respData.messageId,
                 attachments: attachmentUrls?.length || 0,
             });
             return { ok: true, data: respData };
         } else {
-            logger.error('Contact note failed', {
+            logger.error('Live_Chat message failed', {
                 status: response.status,
                 body: respText,
             });
             return { ok: false, status: response.status, error: respData };
         }
     } catch (err) {
-        logger.error('Contact note error', err);
+        logger.error('Live_Chat message error', err);
         return { ok: false, error: err.message };
     }
 }
@@ -338,7 +342,7 @@ async function handleQuoteSubmission(req, res) {
                 .map(r => r.value.url);
         }
 
-        // --- Step 3: Add contact note with quote details + photo URLs ---
+        // --- Step 3: Send Live_Chat message with quote details + photos ---
         if (contactId) {
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
@@ -351,9 +355,9 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                await addContactNote(contactId, msgParts.join('\n'), photoUrls);
+                await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls);
             } catch (msgErr) {
-                logger.error('Contact note failed (non-critical)', msgErr);
+                logger.error('Live_Chat message failed (non-critical)', msgErr);
             }
         }
 
