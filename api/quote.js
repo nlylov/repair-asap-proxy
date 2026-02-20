@@ -181,24 +181,25 @@ async function uploadFileToConversation(contactId, base64Data, fileName, mimeTyp
             body: bodyBuffer,
         });
 
+        const respText = await response.text();
+        let respData;
+        try { respData = JSON.parse(respText); } catch { respData = respText; }
+
         if (response.ok) {
-            const data = await response.json();
-            // GHL returns { urls: ["https://..."] } or similar
-            const url = data.urls?.[0] || data.url || data.fileUrl || null;
-            logger.info('File uploaded to conversation', { fileName, url });
-            return url;
+            const url = respData?.urls?.[0] || respData?.url || respData?.fileUrl || null;
+            logger.info('File uploaded to conversation', { fileName, url, respData });
+            return { url, raw: respData };
         } else {
-            const errText = await response.text();
             logger.error('Conversation file upload failed', {
                 status: response.status,
-                body: errText,
+                body: respText,
                 fileName
             });
-            return null;
+            return { url: null, error: response.status, body: respData };
         }
     } catch (err) {
         logger.error('Conversation file upload error', { fileName, error: err.message });
-        return null;
+        return { url: null, error: err.message };
     }
 }
 
@@ -232,25 +233,27 @@ async function sendConversationMessage(contactId, text, attachmentUrls) {
             body: JSON.stringify(payload),
         });
 
+        const respText = await response.text();
+        let respData;
+        try { respData = JSON.parse(respText); } catch { respData = respText; }
+
         if (response.ok) {
-            const data = await response.json();
             logger.info('Conversation message sent', {
                 contactId,
-                messageId: data.message?.id || data.messageId,
+                messageId: respData?.message?.id || respData?.messageId,
                 attachments: attachmentUrls?.length || 0,
             });
-            return data;
+            return { ok: true, data: respData };
         } else {
-            const errText = await response.text();
             logger.error('Conversation message failed', {
                 status: response.status,
-                body: errText,
+                body: respText,
             });
-            return null;
+            return { ok: false, status: response.status, error: respData };
         }
     } catch (err) {
         logger.error('Conversation message error', err);
-        return null;
+        return { ok: false, error: err.message };
     }
 }
 
@@ -325,14 +328,14 @@ async function handleQuoteSubmission(req, res) {
             });
 
             const results = await Promise.allSettled(uploadPromises);
-            photoUrls = results
-                .filter(r => r.status === 'fulfilled' && r.value)
-                .map(r => r.value);
             _debugUpload = results.map(r => ({
                 status: r.status,
                 value: r.value || null,
                 reason: r.reason?.message || null,
             }));
+            photoUrls = results
+                .filter(r => r.status === 'fulfilled' && r.value?.url)
+                .map(r => r.value.url);
         }
 
         // --- Step 3: Send conversation message with photos ---
