@@ -309,7 +309,7 @@ async function sendLiveChatMessage(contactId, text, attachmentUrls, conversation
  */
 async function handleQuoteSubmission(req, res) {
     try {
-        const { name, phone, email, service, date, message, photos } = req.body;
+        const { name, phone, email, zip, service, date, message, photos } = req.body;
 
         // Validate required fields
         if (!name || !phone) {
@@ -329,6 +329,7 @@ async function handleQuoteSubmission(req, res) {
         const noteParts = [];
         noteParts.push('📋 Source: Website Quote Form');
         if (service) noteParts.push(`🔧 Service: ${service}`);
+        if (zip) noteParts.push(`📍 ZIP: ${zip}`);
         if (date) noteParts.push(`📅 Preferred Date: ${date}`);
         if (message) noteParts.push(`💬 Message: ${message}`);
 
@@ -403,6 +404,7 @@ async function handleQuoteSubmission(req, res) {
             msgParts.push(`📋 New Quote Request from Website`);
             msgParts.push(`👤 ${name}`);
             if (service) msgParts.push(`🔧 Service: ${service}`);
+            if (zip) msgParts.push(`📍 ZIP: ${zip}`);
             if (date) msgParts.push(`📅 Preferred Date: ${date}`);
             if (message) msgParts.push(`💬 "${message}"`);
             if (photoUrls.length > 0) {
