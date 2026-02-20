@@ -311,17 +311,6 @@ async function handleQuoteSubmission(req, res) {
     try {
         const { name, phone, email, service, date, message, photos } = req.body;
 
-        // DEBUG: log what we received
-        logger.info('Quote form received', {
-            name, phone, service,
-            photosReceived: Array.isArray(photos) ? photos.length : 0,
-            photoSizes: Array.isArray(photos) ? photos.map(p => ({
-                name: p.name,
-                type: p.type,
-                dataLen: p.data?.length || 0,
-            })) : [],
-        });
-
         // Validate required fields
         if (!name || !phone) {
             return res.status(400).json({
@@ -365,7 +354,6 @@ async function handleQuoteSubmission(req, res) {
 
         // --- Step 2: Upload photos to conversation (if any) ---
         let photoUrls = [];
-        let _uploadResults = [];
 
         if (contactId && photos && Array.isArray(photos) && photos.length > 0) {
             const maxPhotos = Math.min(photos.length, 5);
@@ -385,7 +373,6 @@ async function handleQuoteSubmission(req, res) {
             });
 
             const results = await Promise.allSettled(uploadPromises);
-            _uploadResults = results.map(r => ({ status: r.status, value: r.value, reason: r.reason?.message }));
             photoUrls = results
                 .filter(r => r.status === 'fulfilled' && r.value?.url)
                 .map(r => r.value.url);
@@ -403,7 +390,6 @@ async function handleQuoteSubmission(req, res) {
         // --- Step 4: Send Live_Chat message to the same conversation thread ---
         // The Opportunity triggers a GHL workflow that sends SMS, creating a conversation.
         // Wait 5s to let the workflow finish, then find that conversation and send our LiveChat there.
-        let _liveChatResult = null;
         if (contactId) {
             await new Promise(resolve => setTimeout(resolve, 5000));
 
@@ -424,15 +410,13 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                _liveChatResult = await sendLiveChatMessage(
+                await sendLiveChatMessage(
                     contactId,
                     msgParts.join('\n'),
                     photoUrls,
                     existingConvId
                 );
-                if (_liveChatResult) _liveChatResult.existingConvId = existingConvId;
             } catch (msgErr) {
-                _liveChatResult = { error: msgErr.message };
                 logger.error('Live_Chat message failed (non-critical)', msgErr);
             }
         }
@@ -442,8 +426,7 @@ async function handleQuoteSubmission(req, res) {
         });
         return res.json({
             success: true,
-            message: 'Quote request received successfully',
-            _debug: { contactId, photoUrls, existingConvId: _liveChatResult?.existingConvId, liveChatResult: _liveChatResult }
+            message: 'Quote request received successfully'
         });
 
     } catch (error) {
