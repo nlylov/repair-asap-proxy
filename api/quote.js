@@ -442,3 +442,6 @@ async function handleQuoteSubmission(req, res) {
 }
 
 module.exports = handleQuoteSubmission;
+module.exports.uploadFileToConversation = uploadFileToConversation;
+module.exports.findConversation = findConversation;
+module.exports.sendLiveChatMessage = sendLiveChatMessage;

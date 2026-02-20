@@ -12,6 +12,7 @@ const { appendLeadToSheet } = require('../lib/googleSheetService');
 const { sendLeadToCRM } = require('../lib/crmService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
+const { uploadFileToConversation, findConversation, sendLiveChatMessage } = require('./quote');
 // --- КОНЕЦ: Блок Импортов ---
 
 const app = express();
@@ -105,6 +106,12 @@ MANDATORY PROTOCOL:
 5. SEQUENCE: Call the tool FIRST. Only after the tool returns success, send the confirmation message to the user.
 6. CONTENT: Never mention WhatsApp.
 7. MULTI-TASK: If user asks for price + booking -> Answer price, THEN call tool.
+
+PHOTO HANDLING:
+- If the conversation contains "[PHOTO UPLOADED]", acknowledge the photo was received.
+- Ask for the user's name and phone number so you can send them a quote.
+- If they already provided a name and phone, call saveBookingToSheet immediately.
+- Mention that a technician will review the photo and text them a flat-rate quote within 30 minutes.
 `
         });
 
@@ -212,6 +219,140 @@ MANDATORY PROTOCOL:
 // --- ROUTE: Quote Form Submission ---
 const handleQuoteSubmission = require('./quote');
 app.post('/api/quote', handleQuoteSubmission);
+
+// --- ROUTE: Chat Photo Upload ---
+app.post('/api/chat-photo', async (req, res) => {
+    if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
+
+    try {
+        const { threadId, photo } = req.body;
+        if (!threadId || !photo || !photo.data) {
+            return res.status(400).json({ error: 'Missing threadId or photo data' });
+        }
+
+        await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`);
+
+        // Add a message to the OpenAI thread about the photo
+        await openai.beta.threads.messages.create(threadId, {
+            role: 'user',
+            content: '[PHOTO UPLOADED] The user has attached a photo of their project. Acknowledge the photo and ask for their name and phone number to send a quote.'
+        });
+
+        // Run the assistant to get a response
+        const run = await openai.beta.threads.runs.create(threadId, {
+            assistant_id: config.openai.assistantId,
+            additional_instructions: `
+Current date: ${new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })}.
+The user just uploaded a photo. Acknowledge it warmly. Ask for their name and phone so you can text them a flat-rate quote within 30 minutes.
+If they already gave name + phone earlier in the thread, call saveBookingToSheet immediately and confirm.
+SYSTEM MODE: DATA ENTRY AGENT. Same rules as always: ALWAYS call saveBookingToSheet when you have name + phone.
+`
+        });
+
+        // Poll for completion
+        let runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        const startTime = Date.now();
+        let formActionData = null;
+        let toolCalled = false;
+
+        while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
+            if (Date.now() - startTime > 50000) {
+                try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
+                return res.status(504).json({ error: 'Timeout' });
+            }
+
+            if (runStatus.status === 'requires_action') {
+                const toolCalls = runStatus.required_action.submit_tool_outputs.tool_calls;
+                let toolOutputs = [];
+
+                await Promise.all(toolCalls.map(async (toolCall) => {
+                    if (toolCall.function.name === 'saveBookingToSheet') {
+                        toolCalled = true;
+                        try {
+                            const args = JSON.parse(toolCall.function.arguments);
+                            const cleanPhone = normalizePhone(args.phone);
+
+                            await sendToTelegram(`🔥📸 <b>PHOTO LEAD CAPTURED!</b>\nName: ${args.name}\nPhone: ${cleanPhone}`);
+
+                            formActionData = {
+                                type: 'FILL_FORM',
+                                payload: { name: args.name, phone: args.phone, email: args.email, service: args.service }
+                            };
+
+                            const leadData = {
+                                reqId: req.id,
+                                timestamp: new Date().toISOString(),
+                                source: 'Chatbot (Photo)',
+                                name: args.name,
+                                phone: cleanPhone,
+                                email: args.email,
+                                service: args.service,
+                                notes: `Photo attached via chat. Time: ${args.time_slot || 'N/A'}`
+                            };
+
+                            const crmPromise = sendLeadToCRM(leadData).then(r => r.success ? '✅ CRM' : `❌ CRM: ${r.error}`);
+                            const sheetPromise = appendLeadToSheet(req, leadData).then(r => r.success ? '✅ Sheet' : `❌ Sheet: ${r.error}`);
+                            const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
+                            await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
+
+                            // Upload photo to GHL conversation if we have a contactId from CRM
+                            if (leadData.contactId) {
+                                try {
+                                    const convId = await findConversation(leadData.contactId);
+                                    const uploadResult = await uploadFileToConversation(
+                                        leadData.contactId,
+                                        photo.data,
+                                        photo.name || 'chat-photo.jpg',
+                                        photo.type || 'image/jpeg'
+                                    );
+                                    if (uploadResult?.url) {
+                                        await sendToTelegram(`📎 Photo uploaded to GHL: ${uploadResult.url}`);
+                                    }
+                                } catch (e) {
+                                    logger.error('GHL photo upload from chat failed', e);
+                                }
+                            }
+
+                            toolOutputs.push({
+                                tool_call_id: toolCall.id,
+                                output: JSON.stringify({ status: 'OK', message: 'Saved successfully with photo.' })
+                            });
+                        } catch (err) {
+                            toolOutputs.push({ tool_call_id: toolCall.id, output: JSON.stringify({ status: 'Error', message: err.message }) });
+                        }
+                    }
+                }));
+
+                if (toolOutputs.length > 0) {
+                    runStatus = await openai.beta.threads.runs.submitToolOutputs(threadId, run.id, { tool_outputs: toolOutputs });
+                }
+            }
+
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            runStatus = await openai.beta.threads.runs.retrieve(threadId, run.id);
+        }
+
+        if (runStatus.status === 'completed') {
+            const messages = await openai.beta.threads.messages.list(threadId, { limit: 1, order: 'desc' });
+            const assistantMessage = messages.data.find(msg => msg.role === 'assistant');
+
+            if (assistantMessage && assistantMessage.content[0]?.type === 'text') {
+                const text = assistantMessage.content[0].text.value
+                    .replace(/【.*?】/g, '')
+                    .replace(/\[\d+:\d+†[^\]]+\]/g, '')
+                    .trim();
+
+                await sendToTelegram(`🤖📸 <b>Bot (photo):</b> ${text}`);
+                return res.json({ success: true, message: text, action: formActionData });
+            }
+        }
+
+        return res.status(500).json({ error: 'Failed to process photo' });
+    } catch (error) {
+        logError(req, '/api/chat-photo', 'Error', error);
+        return res.status(500).json({ error: 'Internal Server Error' });
+    }
+});
 
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
