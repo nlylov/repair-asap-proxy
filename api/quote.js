@@ -275,6 +275,17 @@ async function handleQuoteSubmission(req, res) {
     try {
         const { name, phone, email, service, date, message, photos } = req.body;
 
+        // DEBUG: log what we received
+        logger.info('Quote form received', {
+            name, phone, service,
+            photosReceived: Array.isArray(photos) ? photos.length : 0,
+            photoSizes: Array.isArray(photos) ? photos.map(p => ({
+                name: p.name,
+                type: p.type,
+                dataLen: p.data?.length || 0,
+            })) : [],
+        });
+
         // Validate required fields
         if (!name || !phone) {
             return res.status(400).json({
@@ -380,7 +391,14 @@ async function handleQuoteSubmission(req, res) {
         return res.json({
             success: true,
             message: 'Quote request received successfully',
-            _debug: { contactId, photoUrls, uploadResults: _uploadResults, liveChatResult: _liveChatResult }
+            _debug: {
+                contactId,
+                photosReceived: Array.isArray(photos) ? photos.length : 0,
+                photoDataSizes: Array.isArray(photos) ? photos.map(p => p.data?.length || 0) : [],
+                photoUrls,
+                uploadResults: _uploadResults,
+                liveChatResult: _liveChatResult
+            }
         });
 
     } catch (error) {
