@@ -391,24 +391,28 @@ async function handleQuoteSubmission(req, res) {
                 .map(r => r.value.url);
         }
 
-        // --- Step 3: Send Live_Chat message with quote details + photos ---
-        // Retry to find the existing conversation — GHL workflow creates SMS thread asynchronously
+        // --- Step 3: Create Opportunity (triggers GHL workflow → sends SMS → creates conversation) ---
+        if (contactId) {
+            try {
+                await createOpportunity(contactId, name, service, 'Website Quote Form');
+            } catch (oppErr) {
+                logger.error('Opportunity creation failed (non-critical)', oppErr);
+            }
+        }
+
+        // --- Step 4: Send Live_Chat message to the same conversation thread ---
+        // The Opportunity triggers a GHL workflow that sends SMS, creating a conversation.
+        // Wait 5s to let the workflow finish, then find that conversation and send our LiveChat there.
         let _liveChatResult = null;
         if (contactId) {
+            await new Promise(resolve => setTimeout(resolve, 5000));
+
             let existingConvId = null;
+            try {
+                existingConvId = await findConversation(contactId);
+            } catch (e) { /* ignore */ }
 
-            // Try up to 3 times (with 2s pauses) to find the SMS conversation
-            for (let attempt = 1; attempt <= 3; attempt++) {
-                await new Promise(resolve => setTimeout(resolve, 2000));
-                try {
-                    existingConvId = await findConversation(contactId);
-                    if (existingConvId) {
-                        logger.info(`Found conversation on attempt ${attempt}`, { existingConvId });
-                        break;
-                    }
-                } catch (e) { /* ignore, retry */ }
-            }
-
+            // Build message text
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
             msgParts.push(`👤 ${name}`);
@@ -424,21 +428,12 @@ async function handleQuoteSubmission(req, res) {
                     contactId,
                     msgParts.join('\n'),
                     photoUrls,
-                    existingConvId  // pass the existing conversation ID
+                    existingConvId
                 );
                 if (_liveChatResult) _liveChatResult.existingConvId = existingConvId;
             } catch (msgErr) {
                 _liveChatResult = { error: msgErr.message };
                 logger.error('Live_Chat message failed (non-critical)', msgErr);
-            }
-        }
-
-        // --- Step 4: Create Opportunity ---
-        if (contactId) {
-            try {
-                await createOpportunity(contactId, name, service, 'Website Quote Form');
-            } catch (oppErr) {
-                logger.error('Opportunity creation failed (non-critical)', oppErr);
             }
         }
 
@@ -448,21 +443,16 @@ async function handleQuoteSubmission(req, res) {
         return res.json({
             success: true,
             message: 'Quote request received successfully',
-            _debug: {
-                contactId,
-                photosReceived: Array.isArray(photos) ? photos.length : 0,
-                photoDataSizes: Array.isArray(photos) ? photos.map(p => p.data?.length || 0) : [],
-                photoUrls,
-                uploadResults: _uploadResults,
-                liveChatResult: _liveChatResult
-            }
+            _debug: { contactId, photoUrls, existingConvId: _liveChatResult?.existingConvId, liveChatResult: _liveChatResult }
         });
 
     } catch (error) {
         logger.error('Quote submission error', error);
-        return res.status(500).json({
-            error: 'Server error. Please try calling us at +1 (775) 310-7770.'
-        });
+        if (!res.headersSent) {
+            return res.status(500).json({
+                error: 'Server error. Please try calling us at +1 (775) 310-7770.'
+            });
+        }
     }
 }
 
