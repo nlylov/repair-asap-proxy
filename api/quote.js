@@ -153,8 +153,7 @@ async function handleQuoteSubmission(req, res) {
         } else {
             logger.error('CRM submission failed', { error: crmResult.error });
             return res.status(500).json({
-                error: 'Failed to submit quote. Please try again or call us.',
-                debug: crmResult.error
+                error: 'Failed to submit quote. Please try again or call us.'
             });
         }
 
