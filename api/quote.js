@@ -392,18 +392,22 @@ async function handleQuoteSubmission(req, res) {
         }
 
         // --- Step 3: Send Live_Chat message with quote details + photos ---
-        // Wait a moment for GHL workflow to create the SMS conversation,
-        // then find it and send our message to the same thread.
+        // Retry to find the existing conversation — GHL workflow creates SMS thread asynchronously
         let _liveChatResult = null;
         if (contactId) {
-            // Small delay to let GHL workflow create the SMS conversation first
-            await new Promise(resolve => setTimeout(resolve, 3000));
-
-            // Find the existing conversation (SMS thread)
             let existingConvId = null;
-            try {
-                existingConvId = await findConversation(contactId);
-            } catch (e) { /* ignore */ }
+
+            // Try up to 3 times (with 2s pauses) to find the SMS conversation
+            for (let attempt = 1; attempt <= 3; attempt++) {
+                await new Promise(resolve => setTimeout(resolve, 2000));
+                try {
+                    existingConvId = await findConversation(contactId);
+                    if (existingConvId) {
+                        logger.info(`Found conversation on attempt ${attempt}`, { existingConvId });
+                        break;
+                    }
+                } catch (e) { /* ignore, retry */ }
+            }
 
             const msgParts = [];
             msgParts.push(`📋 New Quote Request from Website`);
