@@ -213,6 +213,134 @@ MANDATORY PROTOCOL:
 const handleQuoteSubmission = require('./quote');
 app.post('/api/quote', handleQuoteSubmission);
 
+// --- TEMP: Debug GHL Conversations ---
+app.post('/api/_debug/conv', async (req, res) => {
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    const { contactId, type, message, attachments, conversationId } = req.body;
+
+    // Step 1: Try to find or create a conversation for this contact
+    let convId = conversationId;
+    if (!convId && contactId) {
+        try {
+            // Search for existing conversation
+            const searchRes = await fetch(`https://services.leadconnectorhq.com/conversations/search?contactId=${contactId}&locationId=${locationId}`, {
+                headers: { 'Authorization': `Bearer ${apiKey}`, 'Version': '2021-07-28' },
+            });
+            const searchData = await searchRes.json();
+            convId = searchData.conversations?.[0]?.id || null;
+        } catch (e) { /* ignore */ }
+    }
+
+    // Step 2: Try sending message
+    const payload = {
+        type: type || 'Custom',
+        contactId,
+        message: message || 'Test from API',
+    };
+    if (attachments) payload.attachments = attachments;
+    if (convId) payload.conversationId = convId;
+
+    try {
+        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify(payload),
+        });
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        res.json({ status: resp.status, conversationId: convId, payload, response: data });
+    } catch (err) {
+        res.json({ error: err.message });
+    }
+});
+
+// --- TEMP: Try creating inbound via different approach ---
+app.post('/api/_debug/inbound', async (req, res) => {
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    const { contactId, message, attachments } = req.body;
+
+    // Try processMessageInbound or similar
+    const payload = {
+        type: 'Custom',
+        contactId,
+        locationId,
+        direction: 'inbound',
+        message: message || 'Inbound test',
+        attachments: attachments || [],
+    };
+
+    const results = {};
+
+    // Attempt 1: conversations/messages with direction
+    try {
+        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify(payload),
+        });
+        const text = await resp.text();
+        results.attemptMessages = { status: resp.status, body: JSON.parse(text) };
+    } catch (e) { results.attemptMessages = { error: e.message }; }
+
+    // Attempt 2: conversations/messages/inbound endpoint
+    try {
+        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages/inbound', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify({
+                type: 'Custom',
+                contactId,
+                locationId,
+                message: message || 'Inbound test v2',
+                attachments: attachments || [],
+            }),
+        });
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        results.attemptInbound = { status: resp.status, body: data };
+    } catch (e) { results.attemptInbound = { error: e.message }; }
+
+    // Attempt 3: Try Live_Chat type
+    try {
+        const resp = await fetch('https://services.leadconnectorhq.com/conversations/messages', {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify({
+                type: 'Live_Chat',
+                contactId,
+                message: message || 'Live Chat test',
+                attachments: attachments || [],
+            }),
+        });
+        const text = await resp.text();
+        let data;
+        try { data = JSON.parse(text); } catch { data = text; }
+        results.attemptLiveChat = { status: resp.status, body: data };
+    } catch (e) { results.attemptLiveChat = { error: e.message }; }
+
+    res.json(results);
+});
+
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 module.exports = app;
