@@ -1,12 +1,130 @@
 // api/quote.js — Quote Form API Route for Vercel
 // Handles form submissions with optional photo uploads,
-// creates a contact in GHL CRM, and uploads photos to GHL Media.
+// creates a contact in GHL CRM, creates an Opportunity in the pipeline,
+// and uploads photos to GHL Media.
 
 const { sendLeadToCRM } = require('../lib/crmService');
 const { logger } = require('../lib/utils/log');
 
 // GHL API base URL
 const GHL_API = 'https://services.leadconnectorhq.com';
+
+// Cache pipeline info to avoid repeated API calls
+let cachedPipelineInfo = null;
+
+/**
+ * Fetch the first pipeline and its first stage from GHL.
+ * Results are cached in memory for the lambda lifecycle.
+ */
+async function getPipelineInfo() {
+    if (cachedPipelineInfo) return cachedPipelineInfo;
+
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    if (!apiKey || !locationId) return null;
+
+    try {
+        const response = await fetch(`${GHL_API}/opportunities/pipelines?locationId=${locationId}`, {
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Version': '2021-07-28',
+            },
+        });
+
+        if (!response.ok) {
+            logger.error('Failed to fetch pipelines', { status: response.status });
+            return null;
+        }
+
+        const data = await response.json();
+        const pipelines = data.pipelines || [];
+
+        if (pipelines.length === 0) {
+            logger.error('No pipelines found in GHL');
+            return null;
+        }
+
+        // Use the first pipeline, first stage ("New Lead" typically)
+        const pipeline = pipelines[0];
+        const firstStage = pipeline.stages?.[0];
+
+        if (!firstStage) {
+            logger.error('No stages found in pipeline', { pipelineId: pipeline.id });
+            return null;
+        }
+
+        cachedPipelineInfo = {
+            pipelineId: pipeline.id,
+            pipelineStageId: firstStage.id,
+            pipelineName: pipeline.name,
+            stageName: firstStage.name,
+        };
+
+        logger.info('Pipeline info loaded', cachedPipelineInfo);
+        return cachedPipelineInfo;
+
+    } catch (err) {
+        logger.error('Error fetching pipeline info', err);
+        return null;
+    }
+}
+
+/**
+ * Create an Opportunity in GHL pipeline linked to a contact.
+ */
+async function createOpportunity(contactId, contactName, service, source) {
+    const apiKey = process.env.PROSBUDDY_API_TOKEN;
+    const locationId = process.env.PROSBUDDY_LOCATION_ID;
+    if (!apiKey || !locationId) return null;
+
+    const pipelineInfo = await getPipelineInfo();
+    if (!pipelineInfo) {
+        logger.error('Cannot create opportunity: no pipeline info');
+        return null;
+    }
+
+    try {
+        const opportunityName = `Lead | Website | ${contactName}`;
+
+        const payload = {
+            pipelineId: pipelineInfo.pipelineId,
+            pipelineStageId: pipelineInfo.pipelineStageId,
+            locationId: locationId,
+            contactId: contactId,
+            name: opportunityName,
+            status: 'open',
+            source: 'Website Quote Form',
+            monetaryValue: 0,
+        };
+
+        const response = await fetch(`${GHL_API}/opportunities/`, {
+            method: 'POST',
+            headers: {
+                'Authorization': `Bearer ${apiKey}`,
+                'Content-Type': 'application/json',
+                'Version': '2021-07-28',
+            },
+            body: JSON.stringify(payload),
+        });
+
+        if (response.ok) {
+            const data = await response.json();
+            logger.info('Opportunity created', {
+                id: data.opportunity?.id,
+                name: opportunityName,
+                stage: pipelineInfo.stageName
+            });
+            return data.opportunity;
+        } else {
+            const errText = await response.text();
+            logger.error('Opportunity creation failed', { status: response.status, body: errText });
+            return null;
+        }
+    } catch (err) {
+        logger.error('Opportunity creation error', err);
+        return null;
+    }
+}
 
 /**
  * Upload a single file (base64) to GHL Media Storage
@@ -143,6 +261,18 @@ async function handleQuoteSubmission(req, res) {
         const crmResult = await sendLeadToCRM(leadData);
 
         if (crmResult.success) {
+            // Extract contactId from the CRM response to create an Opportunity
+            const contactId = crmResult.contactId;
+
+            if (contactId) {
+                // Create Opportunity in pipeline (non-blocking — don't fail if this fails)
+                try {
+                    await createOpportunity(contactId, name, service, 'Website Quote Form');
+                } catch (oppErr) {
+                    logger.error('Opportunity creation failed (non-critical)', oppErr);
+                }
+            }
+
             logger.info('Quote submission successful', {
                 name, phone, service, photoCount: photoUrls.length
             });
