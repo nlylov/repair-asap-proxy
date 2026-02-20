@@ -186,8 +186,17 @@ async function uploadFileToConversation(contactId, base64Data, fileName, mimeTyp
         try { respData = JSON.parse(respText); } catch { respData = respText; }
 
         if (response.ok) {
-            const url = respData?.urls?.[0] || respData?.url || respData?.fileUrl || null;
-            logger.info('File uploaded to conversation', { fileName, url, respData });
+            // GHL returns { uploadedFiles: { "filename": "url" } }
+            const files = respData?.uploadedFiles;
+            let url = null;
+            if (files && typeof files === 'object') {
+                // Get the first file URL from the dict
+                const urls = Object.values(files);
+                url = urls[0] || null;
+            }
+            // Fallback to older formats
+            if (!url) url = respData?.urls?.[0] || respData?.url || respData?.fileUrl || null;
+            logger.info('File uploaded to conversation', { fileName, url });
             return { url, raw: respData };
         } else {
             logger.error('Conversation file upload failed', {
@@ -204,26 +213,24 @@ async function uploadFileToConversation(contactId, base64Data, fileName, mimeTyp
 }
 
 /**
- * Send an inbound message (with optional attachments) into a contact's
- * Conversation thread. Uses POST /conversations/messages.
- * type "Custom" creates an internal/inbound message visible in the chat.
+ * Add a note to a contact with quote request details and photo URLs.
+ * Uses POST /contacts/{contactId}/notes — no conversation provider needed.
+ * Also sends an inbound Custom message with photos if possible.
  */
-async function sendConversationMessage(contactId, text, attachmentUrls) {
+async function addContactNote(contactId, text, attachmentUrls) {
     const apiKey = process.env.PROSBUDDY_API_TOKEN;
     if (!apiKey) return null;
 
     try {
-        const payload = {
-            type: 'Custom',
-            contactId: contactId,
-            message: text || '',
-        };
-
+        // Build note body with photo URLs as clickable links
+        let noteBody = text;
         if (attachmentUrls && attachmentUrls.length > 0) {
-            payload.attachments = attachmentUrls;
+            noteBody += '\n\n📸 Photos:\n' + attachmentUrls.join('\n');
         }
 
-        const response = await fetch(`${GHL_API}/conversations/messages`, {
+        const payload = { body: noteBody };
+
+        const response = await fetch(`${GHL_API}/contacts/${contactId}/notes`, {
             method: 'POST',
             headers: {
                 'Authorization': `Bearer ${apiKey}`,
@@ -238,21 +245,21 @@ async function sendConversationMessage(contactId, text, attachmentUrls) {
         try { respData = JSON.parse(respText); } catch { respData = respText; }
 
         if (response.ok) {
-            logger.info('Conversation message sent', {
+            logger.info('Contact note added', {
                 contactId,
-                messageId: respData?.message?.id || respData?.messageId,
+                noteId: respData?.note?.id,
                 attachments: attachmentUrls?.length || 0,
             });
             return { ok: true, data: respData };
         } else {
-            logger.error('Conversation message failed', {
+            logger.error('Contact note failed', {
                 status: response.status,
                 body: respText,
             });
             return { ok: false, status: response.status, error: respData };
         }
     } catch (err) {
-        logger.error('Conversation message error', err);
+        logger.error('Contact note error', err);
         return { ok: false, error: err.message };
     }
 }
@@ -351,7 +358,7 @@ async function handleQuoteSubmission(req, res) {
             }
 
             try {
-                _debugMsg = await sendConversationMessage(contactId, msgParts.join('\n'), photoUrls);
+                _debugMsg = await addContactNote(contactId, msgParts.join('\n'), photoUrls);
             } catch (msgErr) {
                 _debugMsg = { error: msgErr.message };
                 logger.error('Conversation message failed (non-critical)', msgErr);
