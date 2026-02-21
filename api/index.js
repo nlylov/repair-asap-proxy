@@ -10,6 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const config = require('../lib/config');
 const { appendLeadToSheet } = require('../lib/googleSheetService');
 const { sendLeadToCRM } = require('../lib/crmService');
+const { getAvailableSlots, bookAppointment } = require('../lib/calendarService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
 const { uploadFileToConversation, findConversation, sendLiveChatMessage, createOpportunity } = require('./quote');
@@ -130,7 +131,15 @@ CONVERSATION FLOW:
    d. Preferred date/time — "When works best for you?"
 5. SUMMARIZE → Repeat back: service, address, date, phone. Ask "Does that look right?"
 6. SAVE → Call saveLeadToSheet with ALL collected data. You MUST call this function. Only AFTER the tool succeeds, confirm to user.
-7. CONFIRM → Use EXACTLY this format (translate to user's language):
+7. SCHEDULE → After saving the lead, if the user requested a specific date/time:
+   a. Call checkAvailability with the requested date to see available slots.
+   b. If the requested time is available → immediately call bookAppointment.
+   c. If NOT available → show 2-3 alternative slots from the results: "That time is taken. Here are available slots: [list]. Which works for you?"
+   d. When user picks a slot → call bookAppointment.
+   e. If NO slots on that day → suggest the next day with availability.
+8. CONFIRM BOOKING → After bookAppointment succeeds:
+   "Your appointment is confirmed for [date] at [time]! Our technician will text you 30 minutes before arrival at [phone]. Thank you!"
+   If booking isn't needed (user didn't request a date), use the standard lead confirmation:
    "Perfect! Your request has been submitted. Our team will review the details and text you a flat-rate quote within 30 minutes at [phone]. Thank you!"
 
 MINIMUM SERVICE CALL RULE:
@@ -157,6 +166,8 @@ CRITICAL RULES:
 - NEVER say "saved", "submitted", "booked", "recorded", "сохранены", "записал", "оформлен" unless you actually called saveLeadToSheet in this response.
 - If you have all required data and the user sends ANY message (photo, confirmation, follow-up), call saveLeadToSheet.
 - Include ALL collected data in the tool call (address, zip, date, time, notes).
+- After saving the lead successfully, if user mentioned a date/time → call checkAvailability to check availability, then offer to book.
+- When calling bookAppointment, you MUST provide the contactId that was returned by saveLeadToSheet.
 `;
 
     if (photoMode) {
@@ -291,12 +302,65 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
 
                         toolOutputs.push({
                             tool_call_id: toolCall.id,
-                            output: JSON.stringify({ status: 'OK', message: 'Lead saved successfully.' })
+                            output: JSON.stringify({ status: 'OK', message: 'Lead saved successfully.', contactId: contactId || null })
                         });
                     } catch (err) {
                         toolOutputs.push({
                             tool_call_id: toolCall.id,
                             output: JSON.stringify({ status: 'Error', message: err.message })
+                        });
+                    }
+                }
+                // --- checkAvailability tool ---
+                else if (toolCall.function.name === 'checkAvailability') {
+                    try {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        const result = await getAvailableSlots(args.date, 1);
+                        await sendToTelegram(`📅 <b>Checking availability:</b> ${args.date} → ${result.slots.length} slots available`);
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({
+                                date: args.date,
+                                available_slots: result.slots,
+                                total: result.slots.length,
+                                error: result.error || null,
+                            })
+                        });
+                    } catch (err) {
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({ error: err.message, available_slots: [] })
+                        });
+                    }
+                }
+                // --- bookAppointment tool ---
+                else if (toolCall.function.name === 'bookAppointment') {
+                    try {
+                        const args = JSON.parse(toolCall.function.arguments);
+                        // Build ISO start time from date + time
+                        const startTime = `${args.date}T${args.time}:00-05:00`;
+                        const result = await bookAppointment({
+                            contactId: args.contactId,
+                            startTime,
+                            service: args.service || 'Handyman Service',
+                            address: args.address || '',
+                            contactName: args.contactName || 'Customer',
+                        });
+
+                        if (result.success) {
+                            await sendToTelegram(`📅 <b>APPOINTMENT BOOKED!</b>\n👤 ${args.contactName}\n📅 ${args.date} at ${args.time}\n🔧 ${args.service}\n📍 ${args.address || 'TBD'}`);
+                        } else {
+                            await sendToTelegram(`⚠️ Booking failed: ${result.error}`);
+                        }
+
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify(result)
+                        });
+                    } catch (err) {
+                        toolOutputs.push({
+                            tool_call_id: toolCall.id,
+                            output: JSON.stringify({ success: false, error: err.message })
                         });
                     }
                 }
