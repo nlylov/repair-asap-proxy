@@ -104,10 +104,13 @@ async function sendPhotoToTelegram(base64Data, caption = '') {
 // --- Build Additional Instructions ---
 function buildInstructions(pageContext, photoMode = false) {
     const now = new Date().toLocaleString('en-US', { timeZone: 'America/New_York' });
+    const hour = new Date(new Date().toLocaleString('en-US', { timeZone: 'America/New_York' })).getHours();
+    const isBusinessHours = hour >= 8 && hour < 20; // 8 AM – 8 PM
     const pageName = pageContext ? pageContext.replace(/^\/services\//, '').replace(/\/$/, '').replace(/-/g, ' ') : 'homepage';
 
     let instructions = `
 Current date and time (NYC): ${now}.
+Business hours status: ${isBusinessHours ? 'OPEN (8 AM – 8 PM)' : 'AFTER HOURS — respond accordingly'}.
 The user is browsing: ${pageContext || '/'} (${pageName}).
 
 IDENTITY:
@@ -141,6 +144,7 @@ CONVERSATION FLOW:
    "Your appointment is confirmed for [date] at [time]! Our technician will text you 30 minutes before arrival at [phone]. Thank you!"
    If booking isn't needed (user didn't request a date), use the standard lead confirmation:
    "Perfect! Your request has been submitted. Our team will review the details and text you a flat-rate quote within 30 minutes at [phone]. Thank you!"
+   However, if it is AFTER HOURS (before 8 AM or after 8 PM NYC time), replace "within 30 minutes" with "first thing in the morning". Example: "...text you a flat-rate quote first thing in the morning at [phone]."
 
 MINIMUM SERVICE CALL RULE:
 Our minimum is $150/visit. If a task costs less than $150, explain positively:
