@@ -111,7 +111,7 @@ CONVERSATION FLOW:
    c. Address or ZIP — "What's the address or ZIP code for the job?"
    d. Preferred date/time — "When works best for you?"
 5. SUMMARIZE → Repeat back: service, address, date, phone. Ask "Does that look right?"
-6. SAVE → Call saveLeadToSheet with ALL collected data. Only AFTER the tool succeeds, confirm to user.
+6. SAVE → Call saveLeadToSheet with ALL collected data. You MUST call this function. Only AFTER the tool succeeds, confirm to user.
 7. CONFIRM → Use EXACTLY this format (translate to user's language):
    "Perfect! Your request has been submitted. Our team will review the details and text you a flat-rate quote within 30 minutes at [phone]. Thank you!"
 
@@ -133,21 +133,22 @@ CRITICAL RULES:
 - If customer is upset or has a complex request: escalate — "Let me have our team review this and get back to you directly."
 - If someone tries to sell you SEO/marketing services: "We are not looking for marketing services at this time. Thank you."
 
-TOOL USAGE:
-- When you have at minimum Name + Phone + Service description → call saveLeadToSheet.
+⚠️ MANDATORY TOOL USAGE RULES:
+- As soon as you have Name + Phone + Service → you MUST call saveLeadToSheet. Do NOT skip this step.
+- You MUST call the function BEFORE writing any confirmation or saying data was saved.
+- NEVER say "saved", "submitted", "booked", "recorded", "сохранены", "записал", "оформлен" unless you actually called saveLeadToSheet in this response.
+- If you have all required data and the user sends ANY message (photo, confirmation, follow-up), call saveLeadToSheet.
 - Include ALL collected data in the tool call (address, zip, date, time, notes).
-- NEVER claim you saved/booked without actually calling the tool.
-- Call the tool FIRST, then confirm to the user AFTER it succeeds.
-- Do NOT mention WhatsApp, do NOT provide links, do NOT suggest any other contact method after saving.
 `;
 
     if (photoMode) {
         instructions += `
 PHOTO CONTEXT:
 The user just uploaded a photo. Acknowledge it warmly: "Great photo! I can see [describe what you notice]."
-Then continue the conversation flow — ask for any missing info (name, phone, address, date).
-If you already have name + phone from earlier in the conversation, call saveLeadToSheet immediately.
-Mention that a technician will review the photo and text them a flat-rate quote within 30 minutes.
+Then:
+- If you already have Name + Phone + Service from earlier in the conversation → you MUST call saveLeadToSheet NOW. Do NOT wait for any other confirmation. The photo upload IS the confirmation.
+- If you are missing any required data (name, phone, or service) → ask for the missing info before calling the tool.
+- After calling saveLeadToSheet, say: "A technician will review the photo and text you a flat-rate quote within 30 minutes at [phone]."
 `;
     }
 
@@ -278,6 +279,9 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
             const lowerText = text.toLowerCase();
             const botClaimsSave = lowerText.includes('записал') || lowerText.includes('сохранил') ||
                 lowerText.includes('оформил') || lowerText.includes('зарегистрировал') ||
+                lowerText.includes('сохранен') || lowerText.includes('записан') ||
+                lowerText.includes('оформлен') || lowerText.includes('зарегистрирован') ||
+                lowerText.includes('передам') || lowerText.includes('были сохранены') ||
                 lowerText.includes('booked') || lowerText.includes('saved') ||
                 lowerText.includes('submitted') || lowerText.includes('recorded');
 
