@@ -41,6 +41,24 @@ app.use(express.json({ limit: '25mb' }));
 app.use(express.urlencoded({ extended: true }));
 app.use(express.static(path.join(__dirname, '..', 'public')));
 
+// --- In-memory photo cache (threadId → photoData) with TTL ---
+// Serverless lambdas stay warm for minutes, enough for a chat session
+const photoCache = new Map();
+const PHOTO_TTL_MS = 30 * 60 * 1000; // 30 minutes
+function cachePhoto(threadId, photo) {
+    photoCache.set(threadId, { photo, expires: Date.now() + PHOTO_TTL_MS });
+    // Cleanup old entries
+    for (const [key, val] of photoCache) {
+        if (val.expires < Date.now()) photoCache.delete(key);
+    }
+}
+function getCachedPhoto(threadId) {
+    const entry = photoCache.get(threadId);
+    if (entry && entry.expires > Date.now()) return entry.photo;
+    photoCache.delete(threadId);
+    return null;
+}
+
 // --- Telegram Text Notification ---
 async function sendToTelegram(text) {
     const token = process.env.TELEGRAM_BOT_TOKEN;
@@ -358,10 +376,13 @@ app.post('/api/message', async (req, res) => {
             additional_instructions: buildInstructions(pageContext, false)
         });
 
+        // Retrieve cached photo if one was uploaded earlier in this thread
+        const cachedPhoto = getCachedPhoto(threadId);
+
         await processAssistantRun(req, res, threadId, run, {
-            source: 'Chatbot',
+            source: cachedPhoto ? 'Chatbot (Photo)' : 'Chatbot',
             pageContext: pageContext || '',
-            photoData: null
+            photoData: cachedPhoto
         });
 
     } catch (error) {
@@ -383,6 +404,9 @@ app.post('/api/chat-photo', async (req, res) => {
         // Forward photo to Telegram immediately
         await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`);
         await sendPhotoToTelegram(photo.data, `📸 Chat photo from thread ${threadId}`);
+
+        // Cache photo for later use when saveLeadToSheet fires
+        cachePhoto(threadId, photo);
 
         await openai.beta.threads.messages.create(threadId, {
             role: 'user',
