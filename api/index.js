@@ -517,6 +517,44 @@ app.get('/api/calendar-slots', async (req, res) => {
     }
 });
 
+// Check if customer exists (returning customer detection)
+app.get('/api/check-customer', async (req, res) => {
+    try {
+        const { phone } = req.query;
+        if (!phone) return res.json({ found: false });
+        const digits = phone.replace(/\D/g, '');
+        if (digits.length < 10) return res.json({ found: false });
+
+        const apiKey = process.env.PROSBUDDY_API_TOKEN;
+        const locationId = process.env.PROSBUDDY_LOCATION_ID;
+        if (!apiKey || !locationId) return res.json({ found: false });
+
+        const searchPhone = '+1' + digits.slice(-10);
+        const resp = await fetch(
+            `https://services.leadconnectorhq.com/contacts/search/duplicate?locationId=${locationId}&number=${encodeURIComponent(searchPhone)}`,
+            {
+                headers: {
+                    'Authorization': `Bearer ${apiKey}`,
+                    'Version': '2021-07-28',
+                },
+            }
+        );
+        const data = await resp.json();
+        const contact = data?.contact;
+        if (contact && contact.id) {
+            res.json({
+                found: true,
+                name: contact.firstNameLowerCase ? (contact.firstName || contact.firstNameLowerCase) : (contact.contactName || ''),
+            });
+        } else {
+            res.json({ found: false });
+        }
+    } catch (error) {
+        logError(req, '/api/check-customer', 'Error', error);
+        res.json({ found: false }); // Non-critical, fail silently
+    }
+});
+
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
