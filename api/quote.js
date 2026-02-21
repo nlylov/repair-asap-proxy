@@ -445,3 +445,4 @@ module.exports = handleQuoteSubmission;
 module.exports.uploadFileToConversation = uploadFileToConversation;
 module.exports.findConversation = findConversation;
 module.exports.sendLiveChatMessage = sendLiveChatMessage;
+module.exports.createOpportunity = createOpportunity;

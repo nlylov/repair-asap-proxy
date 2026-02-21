@@ -12,7 +12,7 @@ const { appendLeadToSheet } = require('../lib/googleSheetService');
 const { sendLeadToCRM } = require('../lib/crmService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
-const { uploadFileToConversation, findConversation, sendLiveChatMessage } = require('./quote');
+const { uploadFileToConversation, findConversation, sendLiveChatMessage, createOpportunity } = require('./quote');
 
 const app = express();
 let openai;
@@ -220,27 +220,55 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                         };
 
                         // Parallel: CRM + Sheet
-                        const crmPromise = sendLeadToCRM(leadData).then(r => r.success ? '✅ CRM' : `❌ CRM: ${r.error}`);
-                        const sheetPromise = appendLeadToSheet(req, leadData).then(r => r.success ? '✅ Sheet' : `❌ Sheet: ${r.error}`);
-                        const [crmLog, sheetLog] = await Promise.all([crmPromise, sheetPromise]);
+                        const crmResult = await sendLeadToCRM(leadData);
+                        const crmLog = crmResult.success ? '✅ CRM' : `❌ CRM: ${crmResult.error}`;
+                        const sheetResult = await appendLeadToSheet(req, leadData);
+                        const sheetLog = sheetResult.success ? '✅ Sheet' : `❌ Sheet: ${sheetResult.error}`;
                         await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
 
-                        // Upload photo to GHL if available
-                        if (photoData && leadData.contactId) {
+                        // Create Opportunity + Conversation in GHL (same as quote form)
+                        const contactId = crmResult.contactId;
+                        if (contactId) {
                             try {
-                                await findConversation(leadData.contactId);
-                                const uploadResult = await uploadFileToConversation(
-                                    leadData.contactId,
-                                    photoData.data,
-                                    photoData.name || 'chat-photo.jpg',
-                                    photoData.type || 'image/jpeg'
-                                );
-                                if (uploadResult?.url) {
-                                    await sendToTelegram(`📎 Photo uploaded to GHL: ${uploadResult.url}`);
-                                }
-                            } catch (e) {
-                                logger.error('GHL photo upload failed', e);
+                                await createOpportunity(contactId, args.name, args.service, `Chatbot (${pageContext || '/'})`);
+                            } catch (e) { logger.error('Opportunity creation failed', e); }
+
+                            // Wait for GHL workflow to create conversation
+                            await new Promise(resolve => setTimeout(resolve, 5000));
+
+                            // Find or create conversation + send lead summary
+                            let existingConvId = null;
+                            try { existingConvId = await findConversation(contactId); } catch (e) { /* ignore */ }
+
+                            const msgParts = [`📋 New Lead from Chatbot`];
+                            msgParts.push(`👤 ${args.name}`);
+                            if (args.service) msgParts.push(`🔧 Service: ${args.service}`);
+                            if (args.address) msgParts.push(`📍 Address: ${args.address}`);
+                            if (args.zip) msgParts.push(`🏙 ZIP: ${args.zip}`);
+                            if (args.preferred_date) msgParts.push(`📅 Date: ${args.preferred_date}`);
+                            if (args.preferred_time) msgParts.push(`🕐 Time: ${args.preferred_time}`);
+                            if (args.notes) msgParts.push(`📝 Notes: ${args.notes}`);
+
+                            // Upload photo if available
+                            let photoUrls = [];
+                            if (photoData) {
+                                try {
+                                    const uploadResult = await uploadFileToConversation(
+                                        contactId,
+                                        photoData.data,
+                                        photoData.name || 'chat-photo.jpg',
+                                        photoData.type || 'image/jpeg'
+                                    );
+                                    if (uploadResult?.url) {
+                                        photoUrls.push(uploadResult.url);
+                                        msgParts.push(`📸 Photo attached`);
+                                    }
+                                } catch (e) { logger.error('GHL photo upload failed', e); }
                             }
+
+                            try {
+                                await sendLiveChatMessage(contactId, msgParts.join('\n'), photoUrls, existingConvId);
+                            } catch (e) { logger.error('LiveChat message failed', e); }
                         }
 
                         toolOutputs.push({
