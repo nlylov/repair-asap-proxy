@@ -310,7 +310,7 @@ async function sendLiveChatMessage(contactId, text, attachmentUrls, conversation
  */
 async function handleQuoteSubmission(req, res) {
     try {
-        const { name, phone, email, zip, service, date, message, photos, time } = req.body;
+        const { name, phone, email, zip, service, date, message, photos, time, address } = req.body;
 
         // Validate required fields
         if (!name || !phone) {
@@ -407,6 +407,7 @@ async function handleQuoteSubmission(req, res) {
             if (service) msgParts.push(`🔧 Service: ${service}`);
             if (zip) msgParts.push(`📍 ZIP: ${zip}`);
             if (date) msgParts.push(`📅 Preferred Date: ${date}`);
+            if (address) msgParts.push(`📍 Address: ${address}`);
             if (message) msgParts.push(`💬 "${message}"`);
             if (photoUrls.length > 0) {
                 msgParts.push(`📸 ${photoUrls.length} photo(s) attached`);
@@ -432,7 +433,7 @@ async function handleQuoteSubmission(req, res) {
                     contactId,
                     startTime: time, // ISO format from raw slot data
                     service: service || 'Handyman Service',
-                    address: zip ? `ZIP: ${zip}` : '',
+                    address: address || (zip ? `ZIP: ${zip}` : ''),
                     contactName: name,
                 });
                 if (bookingResult.success) {
