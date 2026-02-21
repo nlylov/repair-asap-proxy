@@ -4,6 +4,7 @@
 // and sends photos into the contact's Conversation thread.
 
 const { sendLeadToCRM } = require('../lib/crmService');
+const { bookAppointment } = require('../lib/calendarService');
 const { logger } = require('../lib/utils/log');
 
 // GHL API base URL
@@ -309,7 +310,7 @@ async function sendLiveChatMessage(contactId, text, attachmentUrls, conversation
  */
 async function handleQuoteSubmission(req, res) {
     try {
-        const { name, phone, email, zip, service, date, message, photos } = req.body;
+        const { name, phone, email, zip, service, date, message, photos, time } = req.body;
 
         // Validate required fields
         if (!name || !phone) {
@@ -423,12 +424,40 @@ async function handleQuoteSubmission(req, res) {
             }
         }
 
+        // --- Step 5: Auto-book calendar appointment (if time slot was selected) ---
+        let bookingResult = null;
+        if (contactId && date && time) {
+            try {
+                bookingResult = await bookAppointment({
+                    contactId,
+                    startTime: time, // ISO format from raw slot data
+                    service: service || 'Handyman Service',
+                    address: zip ? `ZIP: ${zip}` : '',
+                    contactName: name,
+                });
+                if (bookingResult.success) {
+                    logger.info('Quote form: appointment booked', {
+                        appointmentId: bookingResult.appointmentId,
+                        startTime: time,
+                    });
+                } else {
+                    logger.error('Quote form: booking failed', { error: bookingResult.error });
+                }
+            } catch (bookErr) {
+                logger.error('Quote form: booking error (non-critical)', bookErr);
+            }
+        }
+
         logger.info('Quote submission successful', {
-            name, phone, service, photoCount: photoUrls.length
+            name, phone, service, photoCount: photoUrls.length,
+            booked: bookingResult?.success || false,
         });
         return res.json({
             success: true,
-            message: 'Quote request received successfully'
+            message: bookingResult?.success
+                ? `Quote request received and appointment booked!`
+                : 'Quote request received successfully',
+            booked: bookingResult?.success || false,
         });
 
     } catch (error) {

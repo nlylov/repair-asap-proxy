@@ -498,6 +498,21 @@ app.post('/api/chat-photo', async (req, res) => {
 const handleQuoteSubmission = require('./quote');
 app.post('/api/quote', handleQuoteSubmission);
 
+// Calendar slots for quote form date picker
+app.get('/api/calendar-slots', async (req, res) => {
+    try {
+        const { date } = req.query;
+        if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+            return res.status(400).json({ error: 'Invalid date format. Use YYYY-MM-DD' });
+        }
+        const result = await getAvailableSlots(date, 1);
+        res.json({ date: result.date, slots: result.slots, raw: result.raw || [], error: result.error || null });
+    } catch (error) {
+        logError(req, '/api/calendar-slots', 'Error', error);
+        res.status(500).json({ error: 'Failed to fetch slots' });
+    }
+});
+
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
