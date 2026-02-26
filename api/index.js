@@ -558,43 +558,53 @@ app.get('/api/check-customer', async (req, res) => {
 // --- ROUTE: AI Hub (Unified AI Brain) ---
 const aiHub = require('../lib/ai-hub');
 
-// Webhook endpoint - receives events from GHL workflows
+// Webhook endpoint - receives events from GHL workflows (SYNCHRONOUS)
+// GHL workflow calls this, waits for response, then uses response body
+// in the "Send Yelp message" action: {{webhook.response.message}}
 app.post('/api/ai-hub/webhook', async (req, res) => {
     const context = '/api/ai-hub/webhook';
     logInfo(req, context, 'AI Hub webhook received', { body: req.body });
 
-    const event = req.body;
-
-    if (!event.contactId && !event.contact_id) {
-        return res.status(400).json({ error: 'Missing contactId in webhook payload' });
-    }
-
-    // Normalize field names (GHL sends both formats)
-    const normalizedEvent = {
-        type: event.type || event.event || 'InboundMessage',
-        contactId: event.contactId || event.contact_id,
-        conversationId: event.conversationId || event.conversation_id,
-        direction: event.direction || 'inbound', // 'inbound' = customer, 'outbound' = owner
-        body: event.body || event.message || event.messageBody || '',
-        channel: event.channel || detectChannel(event),
-        attachments: event.attachments || [],
-    };
-
-    // Quick check: skip outbound immediately (no need for async)
-    if (normalizedEvent.direction === 'outbound') {
-        return res.json({ skipped: true, reason: 'Outbound message from owner/team' });
-    }
-
-    // Respond 200 immediately so GHL does not retry
-    res.json({ received: true, processing: true });
-
-    // Process async — Vercel keeps the function alive after res.end()
-    // (up to 60s on Pro plan, 10s on Hobby)
     try {
+        const event = req.body;
+
+        if (!event.contactId && !event.contact_id) {
+            return res.status(400).json({ error: 'Missing contactId in webhook payload' });
+        }
+
+        // Normalize field names (GHL sends both formats)
+        const normalizedEvent = {
+            type: event.type || event.event || 'InboundMessage',
+            contactId: event.contactId || event.contact_id,
+            conversationId: event.conversationId || event.conversation_id,
+            direction: event.direction || 'inbound',
+            body: event.body || event.message || event.messageBody || '',
+            channel: event.channel || detectChannel(event),
+            attachments: event.attachments || [],
+        };
+
+        // Skip outbound (owner) messages
+        if (normalizedEvent.direction === 'outbound') {
+            return res.json({ skipped: true, message: '', reason: 'Outbound message from owner/team' });
+        }
+
+        // handleWebhook applies delay, checks owner cooldown, generates AI response
+        // It does NOT send the message — GHL workflow handles delivery
         const result = await aiHub.handleWebhook(normalizedEvent);
         logInfo(req, context, 'AI Hub webhook processed', { result });
+
+        // Return response for GHL to use in "Send Yelp message" action
+        // GHL accesses it as: {{webhook.response.message}}
+        res.json({
+            success: !result.skipped,
+            message: result.message || '',
+            skipped: result.skipped || false,
+            reason: result.reason || '',
+        });
     } catch (error) {
-        logError(req, context, 'AI Hub async processing error', { error: error.message });
+        logError(req, context, 'AI Hub webhook error', { error: error.message });
+        // Return empty message on error — GHL won't send anything
+        res.json({ success: false, message: '', error: error.message });
     }
 });
 
