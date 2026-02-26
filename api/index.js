@@ -563,29 +563,38 @@ app.post('/api/ai-hub/webhook', async (req, res) => {
     const context = '/api/ai-hub/webhook';
     logInfo(req, context, 'AI Hub webhook received', { body: req.body });
 
+    const event = req.body;
+
+    if (!event.contactId && !event.contact_id) {
+        return res.status(400).json({ error: 'Missing contactId in webhook payload' });
+    }
+
+    // Normalize field names (GHL sends both formats)
+    const normalizedEvent = {
+        type: event.type || event.event || 'InboundMessage',
+        contactId: event.contactId || event.contact_id,
+        conversationId: event.conversationId || event.conversation_id,
+        direction: event.direction || 'inbound', // 'inbound' = customer, 'outbound' = owner
+        body: event.body || event.message || event.messageBody || '',
+        channel: event.channel || detectChannel(event),
+        attachments: event.attachments || [],
+    };
+
+    // Quick check: skip outbound immediately (no need for async)
+    if (normalizedEvent.direction === 'outbound') {
+        return res.json({ skipped: true, reason: 'Outbound message from owner/team' });
+    }
+
+    // Respond 200 immediately so GHL does not retry
+    res.json({ received: true, processing: true });
+
+    // Process async — Vercel keeps the function alive after res.end()
+    // (up to 60s on Pro plan, 10s on Hobby)
     try {
-        const event = req.body;
-
-        if (!event.contactId && !event.contact_id) {
-            return res.status(400).json({ error: 'Missing contactId in webhook payload' });
-        }
-
-        // Normalize field names (GHL sends both formats)
-        const normalizedEvent = {
-            type: event.type || event.event || 'InboundMessage',
-            contactId: event.contactId || event.contact_id,
-            conversationId: event.conversationId || event.conversation_id,
-            body: event.body || event.message || event.messageBody || '',
-            channel: event.channel || detectChannel(event),
-            attachments: event.attachments || [],
-        };
-
         const result = await aiHub.handleWebhook(normalizedEvent);
         logInfo(req, context, 'AI Hub webhook processed', { result });
-        res.json(result);
     } catch (error) {
-        logError(req, context, 'AI Hub webhook error', { error });
-        res.status(500).json({ error: 'AI Hub processing failed', message: error.message });
+        logError(req, context, 'AI Hub async processing error', { error: error.message });
     }
 });
 
