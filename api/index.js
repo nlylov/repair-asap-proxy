@@ -606,7 +606,7 @@ app.post('/api/ai-hub/webhook', async (req, res) => {
     } catch (error) {
         logError(req, context, 'AI Hub webhook error', { error: error.message });
         // Return empty message on error — GHL won't send anything
-        res.json({ success: false, message: '', error: error.message });
+        res.json({ success: false, message: '', aiResponse: '', error: error.message });
     }
 });
 
