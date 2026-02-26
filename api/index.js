@@ -594,10 +594,12 @@ app.post('/api/ai-hub/webhook', async (req, res) => {
         logInfo(req, context, 'AI Hub webhook processed', { result });
 
         // Return response for GHL to use in "Send Yelp message" action
-        // GHL accesses it as: {{webhook.response.message}}
+        // GHL Custom Webhook accesses: {{custom_webhook.1.body.aiResponse}}
+        const aiMessage = result.message || '';
         res.json({
             success: !result.skipped,
-            message: result.message || '',
+            message: aiMessage,
+            aiResponse: aiMessage,  // alias for GHL variable picker
             skipped: result.skipped || false,
             reason: result.reason || '',
         });
