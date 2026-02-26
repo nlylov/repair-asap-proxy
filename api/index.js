@@ -555,6 +555,73 @@ app.get('/api/check-customer', async (req, res) => {
     }
 });
 
+// --- ROUTE: AI Hub (Unified AI Brain) ---
+const aiHub = require('../lib/ai-hub');
+
+// Webhook endpoint - receives events from GHL workflows
+app.post('/api/ai-hub/webhook', async (req, res) => {
+    const context = '/api/ai-hub/webhook';
+    logInfo(req, context, 'AI Hub webhook received', { body: req.body });
+
+    try {
+        const event = req.body;
+
+        if (!event.contactId && !event.contact_id) {
+            return res.status(400).json({ error: 'Missing contactId in webhook payload' });
+        }
+
+        // Normalize field names (GHL sends both formats)
+        const normalizedEvent = {
+            type: event.type || event.event || 'InboundMessage',
+            contactId: event.contactId || event.contact_id,
+            conversationId: event.conversationId || event.conversation_id,
+            body: event.body || event.message || event.messageBody || '',
+            channel: event.channel || detectChannel(event),
+            attachments: event.attachments || [],
+        };
+
+        const result = await aiHub.handleWebhook(normalizedEvent);
+        logInfo(req, context, 'AI Hub webhook processed', { result });
+        res.json(result);
+    } catch (error) {
+        logError(req, context, 'AI Hub webhook error', { error });
+        res.status(500).json({ error: 'AI Hub processing failed', message: error.message });
+    }
+});
+
+// Test endpoint - simulates a message for dry-run testing
+app.post('/api/ai-hub/test', async (req, res) => {
+    const context = '/api/ai-hub/test';
+    logInfo(req, context, 'AI Hub test request', { body: req.body });
+
+    try {
+        const { channel, customer_name, message, contact_id, dry_run, attachments } = req.body;
+
+        const result = await aiHub.handleTest({
+            channel: channel || 'yelp',
+            customerName: customer_name || 'Test Customer',
+            message: message || 'How much for TV mounting?',
+            contactId: contact_id || null,
+            dryRun: dry_run !== false,
+            attachments: attachments || [],
+        });
+
+        res.json(result);
+    } catch (error) {
+        logError(req, context, 'AI Hub test error', { error });
+        res.status(500).json({ error: 'AI Hub test failed', message: error.message });
+    }
+});
+
+// Helper: detect channel from GHL webhook metadata
+function detectChannel(event) {
+    if (event.source === 'yelp' || event.messageSource === 'yelp') return 'yelp';
+    if (event.source === 'thumbtack') return 'thumbtack';
+    if (event.type === 'SMS' || event.messageType === 'SMS') return 'sms';
+    if (event.type === 'Email') return 'email';
+    return 'sms'; // default
+}
+
 // Health check
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
