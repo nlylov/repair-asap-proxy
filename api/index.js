@@ -558,20 +558,46 @@ app.get('/api/check-customer', async (req, res) => {
 // --- ROUTE: AI Hub (Unified AI Brain) ---
 const aiHub = require('../lib/ai-hub');
 
-// --- Deduplication: prevent double-response if both "Tag Added" + "Customer Replied" fire ---
-// Serverless functions may be warm enough for this to work within a conversation burst
-const processedMessages = new Map(); // messageId -> timestamp
-const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
-function isDuplicate(messageId) {
-    if (!messageId) return false;
-    const now = Date.now();
-    // Cleanup old entries
-    for (const [id, ts] of processedMessages) {
-        if (now - ts > DEDUP_TTL_MS) processedMessages.delete(id);
+// --- Deduplication + Burst Throttle ---
+// Prevents double-response when both "Tag Added" + "Customer Replied" fire simultaneously.
+// Also prevents back-to-back responses when a customer sends 2 messages within 90 seconds.
+const processedMessages = new Map(); // dedupeKey -> timestamp
+const lastBotReply = new Map();      // conversationId -> timestamp
+const DEDUP_TTL_MS = 2 * 60 * 60 * 1000; // 2 hours
+const BURST_THROTTLE_MS = 90 * 1000;     // 90 seconds between bot replies per conversation
+
+function makeDedupKey(channel, conversationId, messageId, body) {
+    if (messageId) {
+        // Scoped: channel:conversation:messageId prevents cross-channel collisions
+        return `${channel || 'unknown'}:${conversationId || 'none'}:${messageId}`;
     }
-    if (processedMessages.has(messageId)) return true;
-    processedMessages.set(messageId, now);
+    // Fallback: hash from content + minute bucket (rounds to nearest minute for dedup window)
+    const minuteBucket = Math.floor(Date.now() / 60000);
+    const raw = `${channel}:${conversationId}:inbound:${(body || '').slice(0, 80)}:${minuteBucket}`;
+    // Simple djb2 hash — good enough for dedup, no crypto needed
+    let hash = 5381;
+    for (let i = 0; i < raw.length; i++) hash = ((hash << 5) + hash) ^ raw.charCodeAt(i);
+    return `hash:${hash >>> 0}`;
+}
+
+function isDuplicate(key) {
+    const now = Date.now();
+    for (const [k, ts] of processedMessages) {
+        if (now - ts > DEDUP_TTL_MS) processedMessages.delete(k);
+    }
+    if (processedMessages.has(key)) return true;
+    processedMessages.set(key, now);
     return false;
+}
+
+function isBurstThrottled(conversationId) {
+    if (!conversationId) return false;
+    const last = lastBotReply.get(conversationId);
+    return last && (Date.now() - last) < BURST_THROTTLE_MS;
+}
+
+function recordBotReply(conversationId) {
+    if (conversationId) lastBotReply.set(conversationId, Date.now());
 }
 
 // Webhook endpoint - receives events from GHL workflows (SYNCHRONOUS)
@@ -601,21 +627,41 @@ app.post('/api/ai-hub/webhook', async (req, res) => {
         };
 
         // Skip outbound (owner) messages — double guard (also checked in ai-hub.js)
+        // MUST be before any GHL API calls to avoid wasted requests
         if (normalizedEvent.direction === 'outbound') {
-            return res.json({ skipped: true, message: '', reason: 'Outbound message from owner/team' });
+            return res.json({ skipped: true, message: '', aiResponse: '', reason: 'Outbound message from owner/team' });
         }
 
         // Dedup: prevent double-response when both "Contact Tag Added" + "Customer Replied" fire
         // for the same inbound message (race condition with two triggers + re-entry ON)
-        if (isDuplicate(normalizedEvent.messageId)) {
-            logInfo(req, context, 'Duplicate messageId — skipping', { messageId: normalizedEvent.messageId });
-            return res.json({ skipped: true, message: '', aiResponse: '', reason: 'Duplicate messageId (dedup)' });
+        const dedupKey = makeDedupKey(
+            normalizedEvent.channel,
+            normalizedEvent.conversationId,
+            normalizedEvent.messageId,
+            normalizedEvent.body
+        );
+        if (isDuplicate(dedupKey)) {
+            logInfo(req, context, 'Duplicate message — skipping', { dedupKey });
+            return res.json({ skipped: true, message: '', aiResponse: '', reason: 'Duplicate (dedup)' });
+        }
+
+        // Burst throttle: if bot already replied in this conversation within 90s, hold off.
+        // Handles "Hi" + "Are you available?" sent back-to-back by the same customer.
+        if (isBurstThrottled(normalizedEvent.conversationId)) {
+            const secAgo = Math.round((Date.now() - lastBotReply.get(normalizedEvent.conversationId)) / 1000);
+            logInfo(req, context, `Burst throttle — bot replied ${secAgo}s ago, skipping`, { conversationId: normalizedEvent.conversationId });
+            return res.json({ skipped: true, message: '', aiResponse: '', reason: `Burst throttle (${secAgo}s since last reply)` });
         }
 
         // handleWebhook applies delay, checks owner cooldown, generates AI response
         // It does NOT send the message — GHL workflow handles delivery
         const result = await aiHub.handleWebhook(normalizedEvent);
         logInfo(req, context, 'AI Hub webhook processed', { result });
+
+        // Record bot reply timestamp for burst throttle (only if we actually responded)
+        if (!result.skipped && result.message) {
+            recordBotReply(normalizedEvent.conversationId);
+        }
 
         // Return response for GHL to use in "Send Yelp message" action
         // GHL Custom Webhook accesses: {{custom_webhook.1.body.aiResponse}}
