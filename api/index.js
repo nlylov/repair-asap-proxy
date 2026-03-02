@@ -558,6 +558,22 @@ app.get('/api/check-customer', async (req, res) => {
 // --- ROUTE: AI Hub (Unified AI Brain) ---
 const aiHub = require('../lib/ai-hub');
 
+// --- Deduplication: prevent double-response if both "Tag Added" + "Customer Replied" fire ---
+// Serverless functions may be warm enough for this to work within a conversation burst
+const processedMessages = new Map(); // messageId -> timestamp
+const DEDUP_TTL_MS = 5 * 60 * 1000; // 5 minutes
+function isDuplicate(messageId) {
+    if (!messageId) return false;
+    const now = Date.now();
+    // Cleanup old entries
+    for (const [id, ts] of processedMessages) {
+        if (now - ts > DEDUP_TTL_MS) processedMessages.delete(id);
+    }
+    if (processedMessages.has(messageId)) return true;
+    processedMessages.set(messageId, now);
+    return false;
+}
+
 // Webhook endpoint - receives events from GHL workflows (SYNCHRONOUS)
 // GHL workflow calls this, waits for response, then uses response body
 // in the "Send Yelp message" action: {{webhook.response.message}}
@@ -577,15 +593,23 @@ app.post('/api/ai-hub/webhook', async (req, res) => {
             type: event.type || event.event || 'InboundMessage',
             contactId: event.contactId || event.contact_id,
             conversationId: event.conversationId || event.conversation_id,
+            messageId: event.messageId || event.message_id || event.id || null,
             direction: event.direction || 'inbound',
             body: event.body || event.message || event.messageBody || '',
             channel: event.channel || detectChannel(event),
             attachments: event.attachments || [],
         };
 
-        // Skip outbound (owner) messages
+        // Skip outbound (owner) messages — double guard (also checked in ai-hub.js)
         if (normalizedEvent.direction === 'outbound') {
             return res.json({ skipped: true, message: '', reason: 'Outbound message from owner/team' });
+        }
+
+        // Dedup: prevent double-response when both "Contact Tag Added" + "Customer Replied" fire
+        // for the same inbound message (race condition with two triggers + re-entry ON)
+        if (isDuplicate(normalizedEvent.messageId)) {
+            logInfo(req, context, 'Duplicate messageId — skipping', { messageId: normalizedEvent.messageId });
+            return res.json({ skipped: true, message: '', aiResponse: '', reason: 'Duplicate messageId (dedup)' });
         }
 
         // handleWebhook applies delay, checks owner cooldown, generates AI response
