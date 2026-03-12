@@ -169,6 +169,43 @@ router.post('/webhook', async (req, res) => {
                 }
             }
 
+            // 3. Push transcript to Repair ASAP CRM
+            if (customerNumber) {
+                const crmBaseUrl = process.env.CRM_BASE_URL; // e.g. https://repair-asap-crm-production.up.railway.app
+                if (crmBaseUrl) {
+                    try {
+                        const durationSeconds = callData.call?.duration || callData.duration || 0;
+                        const durationMin = Math.floor(durationSeconds / 60);
+                        const durationSec = durationSeconds % 60;
+                        const durationStr = durationMin > 0 ? `${durationMin}m ${durationSec}s` : `${durationSeconds}s`;
+
+                        const crmPayload = {
+                            from: customerNumber,
+                            callSid: callData.call?.id || '',
+                            transcript: transcript || '',
+                            summary: summary || '',
+                            recordingUrl: recordingUrl || '',
+                            duration: durationStr,
+                            source: 'vapi',
+                        };
+
+                        const crmResponse = await fetch(`${crmBaseUrl}/api/twilio/voice/transcript`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify(crmPayload),
+                        });
+
+                        if (crmResponse.ok) {
+                            logger.info('VAPI transcript pushed to CRM', { customerNumber });
+                        } else {
+                            logger.warn('CRM transcript push failed', { status: crmResponse.status });
+                        }
+                    } catch (crmErr) {
+                        logger.error('Failed to push VAPI transcript to CRM', crmErr);
+                    }
+                }
+            }
+
             return res.json({ success: true });
         }
 
