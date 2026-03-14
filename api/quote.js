@@ -326,7 +326,37 @@ async function handleQuoteSubmission(req, res) {
             });
         }
 
-        // --- Step 1: Create / upsert contact in CRM ---
+        // ═══════════════════════════════════════════════════════
+        // STEP 1: Forward to NEW CRM (PRIMARY — awaited)
+        // ═══════════════════════════════════════════════════════
+        const newCrmUrl = process.env.NEW_CRM_WEBHOOK_URL || 'https://crm.asap.repair/api/webhooks/website';
+        const newCrmSecret = process.env.NEW_CRM_WEBHOOK_SECRET;
+        let crmOk = false;
+        if (newCrmSecret) {
+            try {
+                const crmRes = await fetch(newCrmUrl, {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'X-Webhook-Secret': newCrmSecret,
+                    },
+                    body: JSON.stringify({ name, phone, email, zip, service, date, message, address }),
+                });
+                if (crmRes.ok) {
+                    crmOk = true;
+                    logger.info('Lead sent to new CRM', { name, phone });
+                } else {
+                    logger.error('New CRM webhook failed', { status: crmRes.status });
+                }
+            } catch (err) {
+                logger.error('New CRM webhook error', { error: err.message });
+            }
+        }
+
+        // ═══════════════════════════════════════════════════════
+        // STEP 2: GHL contact + opportunity (BACKGROUND — non-blocking)
+        // Still needed for calendar booking (contactId)
+        // ═══════════════════════════════════════════════════════
         const noteParts = [];
         noteParts.push('📋 Source: Website Quote Form');
         if (service) noteParts.push(`🔧 Service: ${service}`);
@@ -343,114 +373,36 @@ async function handleQuoteSubmission(req, res) {
             tags: ['quote-form', 'website-lead'],
         };
 
+        // Create GHL contact (needed for booking)
         const crmResult = await sendLeadToCRM(leadData);
+        const contactId = crmResult.success ? crmResult.contactId : null;
 
-        if (!crmResult.success) {
-            logger.error('CRM submission failed', { error: crmResult.error });
+        if (!crmResult.success && !crmOk) {
+            // Both CRM and GHL failed — report error
+            logger.error('Both CRM systems failed', { error: crmResult.error });
             return res.status(500).json({
                 error: 'Failed to submit quote. Please try again or call us.'
             });
         }
 
-        const contactId = crmResult.contactId;
-
-        // --- Forward to new CRM (fire-and-forget) ---
-        const newCrmUrl = process.env.NEW_CRM_WEBHOOK_URL || 'https://crm.asap.repair/api/webhooks/website';
-        const newCrmSecret = process.env.NEW_CRM_WEBHOOK_SECRET;
-        if (newCrmSecret) {
-            fetch(newCrmUrl, {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json',
-                    'X-Webhook-Secret': newCrmSecret,
-                },
-                body: JSON.stringify({ name, phone, email, zip, service, date, message, address }),
-            }).then(r => {
-                if (r.ok) logger.info('Lead forwarded to new CRM', { name, phone });
-                else logger.error('New CRM webhook failed', { status: r.status });
-            }).catch(err => {
-                logger.error('New CRM webhook error', { error: err.message });
-            });
-        }
-
-        // --- Step 2: Upload photos to conversation (if any) ---
-        let photoUrls = [];
-
-        if (contactId && photos && Array.isArray(photos) && photos.length > 0) {
-            const maxPhotos = Math.min(photos.length, 5);
-            const uploadPromises = photos.slice(0, maxPhotos).map((photo, i) => {
-                const { data, name: photoName, type } = photo;
-                if (!data || !type) return Promise.resolve(null);
-
-                // Validate size (~7MB base64 ≈ 5MB file)
-                if (data.length > 7 * 1024 * 1024) return Promise.resolve(null);
-
-                return uploadFileToConversation(
-                    contactId,
-                    data,
-                    photoName || `photo-${i + 1}.jpg`,
-                    type
-                );
-            });
-
-            const results = await Promise.allSettled(uploadPromises);
-            photoUrls = results
-                .filter(r => r.status === 'fulfilled' && r.value?.url)
-                .map(r => r.value.url);
-        }
-
-        // --- Step 3: Create Opportunity (triggers GHL workflow → sends SMS → creates conversation) ---
+        // GHL Opportunity + LiveChat — fire-and-forget (no await, no 5s delay)
         if (contactId) {
-            try {
-                await createOpportunity(contactId, name, service, 'Website Quote Form');
-            } catch (oppErr) {
-                logger.error('Opportunity creation failed (non-critical)', oppErr);
-            }
+            (async () => {
+                try {
+                    await createOpportunity(contactId, name, service, 'Website Quote Form');
+                } catch (e) { logger.error('GHL Opportunity (bg)', e); }
+            })();
         }
 
-        // --- Step 4: Send Live_Chat message to the same conversation thread ---
-        // The Opportunity triggers a GHL workflow that sends SMS, creating a conversation.
-        // Wait 5s to let the workflow finish, then find that conversation and send our LiveChat there.
-        if (contactId) {
-            await new Promise(resolve => setTimeout(resolve, 5000));
-
-            let existingConvId = null;
-            try {
-                existingConvId = await findConversation(contactId);
-            } catch (e) { /* ignore */ }
-
-            // Build message text
-            const msgParts = [];
-            msgParts.push(`📋 New Quote Request from Website`);
-            msgParts.push(`👤 ${name}`);
-            if (service) msgParts.push(`🔧 Service: ${service}`);
-            if (zip) msgParts.push(`📍 ZIP: ${zip}`);
-            if (date) msgParts.push(`📅 Preferred Date: ${date}`);
-            if (address) msgParts.push(`📍 Address: ${address}`);
-            if (message) msgParts.push(`💬 "${message}"`);
-            if (photoUrls.length > 0) {
-                msgParts.push(`📸 ${photoUrls.length} photo(s) attached`);
-            }
-
-            try {
-                await sendLiveChatMessage(
-                    contactId,
-                    msgParts.join('\n'),
-                    photoUrls,
-                    existingConvId
-                );
-            } catch (msgErr) {
-                logger.error('Live_Chat message failed (non-critical)', msgErr);
-            }
-        }
-
-        // --- Step 5: Auto-book calendar appointment (if time slot was selected) ---
+        // ═══════════════════════════════════════════════════════
+        // STEP 3: Calendar booking (still needs GHL contactId)
+        // ═══════════════════════════════════════════════════════
         let bookingResult = null;
         if (contactId && date && time) {
             try {
                 bookingResult = await bookAppointment({
                     contactId,
-                    startTime: time, // ISO format from raw slot data
+                    startTime: time,
                     service: service || 'Handyman Service',
                     address: address || (zip ? `ZIP: ${zip}` : ''),
                     contactName: name,
@@ -469,7 +421,9 @@ async function handleQuoteSubmission(req, res) {
         }
 
         logger.info('Quote submission successful', {
-            name, phone, service, photoCount: photoUrls.length,
+            name, phone, service,
+            crmOk,
+            ghlOk: crmResult.success,
             booked: bookingResult?.success || false,
         });
         return res.json({
