@@ -332,6 +332,7 @@ async function handleQuoteSubmission(req, res) {
         const newCrmUrl = process.env.NEW_CRM_WEBHOOK_URL || 'https://crm.asap.repair/api/webhooks/website';
         const newCrmSecret = process.env.NEW_CRM_WEBHOOK_SECRET;
         let crmOk = false;
+        let crmContactId = null;
         if (newCrmSecret) {
             try {
                 const crmRes = await fetch(newCrmUrl, {
@@ -343,8 +344,10 @@ async function handleQuoteSubmission(req, res) {
                     body: JSON.stringify({ name, phone, email, zip, service, date, message, address }),
                 });
                 if (crmRes.ok) {
+                    const crmData = await crmRes.json();
                     crmOk = true;
-                    logger.info('Lead sent to new CRM', { name, phone });
+                    crmContactId = crmData.contactId || null;
+                    logger.info('Lead sent to new CRM', { name, phone, contactId: crmContactId });
                 } else {
                     logger.error('New CRM webhook failed', { status: crmRes.status });
                 }
@@ -354,54 +357,65 @@ async function handleQuoteSubmission(req, res) {
         }
 
         // ═══════════════════════════════════════════════════════
-        // STEP 2: GHL contact + opportunity (BACKGROUND — non-blocking)
-        // Still needed for calendar booking (contactId)
+        // STEP 2: GHL contact + opportunity (BACKGROUND — fully fire-and-forget)
+        // No longer needed for booking — CRM handles calendar now
         // ═══════════════════════════════════════════════════════
-        const noteParts = [];
-        noteParts.push('📋 Source: Website Quote Form');
-        if (service) noteParts.push(`🔧 Service: ${service}`);
-        if (zip) noteParts.push(`📍 ZIP: ${zip}`);
-        if (date) noteParts.push(`📅 Preferred Date: ${date}`);
-        if (message) noteParts.push(`💬 Message: ${message}`);
+        if (!crmOk) {
+            // Fallback: if CRM failed, try GHL
+            const noteParts = [];
+            noteParts.push('📋 Source: Website Quote Form');
+            if (service) noteParts.push(`🔧 Service: ${service}`);
+            if (zip) noteParts.push(`📍 ZIP: ${zip}`);
+            if (date) noteParts.push(`📅 Preferred Date: ${date}`);
+            if (message) noteParts.push(`💬 Message: ${message}`);
 
-        const leadData = {
-            name,
-            phone,
-            email: email || '',
-            service: service || 'Not specified',
-            notes: noteParts.join('\n\n'),
-            tags: ['quote-form', 'website-lead'],
-        };
+            const leadData = {
+                name, phone, email: email || '',
+                service: service || 'Not specified',
+                notes: noteParts.join('\n\n'),
+                tags: ['quote-form', 'website-lead'],
+            };
 
-        // Create GHL contact (needed for booking)
-        const crmResult = await sendLeadToCRM(leadData);
-        const contactId = crmResult.success ? crmResult.contactId : null;
-
-        if (!crmResult.success && !crmOk) {
-            // Both CRM and GHL failed — report error
-            logger.error('Both CRM systems failed', { error: crmResult.error });
-            return res.status(500).json({
-                error: 'Failed to submit quote. Please try again or call us.'
-            });
-        }
-
-        // GHL Opportunity + LiveChat — fire-and-forget (no await, no 5s delay)
-        if (contactId) {
+            const crmResult = await sendLeadToCRM(leadData);
+            if (!crmResult.success) {
+                logger.error('Both CRM systems failed', { error: crmResult.error });
+                return res.status(500).json({
+                    error: 'Failed to submit quote. Please try again or call us.'
+                });
+            }
+            // GHL Opportunity — background
+            if (crmResult.contactId) {
+                (async () => {
+                    try { await createOpportunity(crmResult.contactId, name, service, 'Website Quote Form'); }
+                    catch (e) { logger.error('GHL Opportunity (bg)', e); }
+                })();
+            }
+        } else {
+            // CRM succeeded — GHL is fully fire-and-forget background
             (async () => {
                 try {
-                    await createOpportunity(contactId, name, service, 'Website Quote Form');
-                } catch (e) { logger.error('GHL Opportunity (bg)', e); }
+                    const leadData = {
+                        name, phone, email: email || '',
+                        service: service || 'Not specified',
+                        notes: '📋 Source: Website Quote Form',
+                        tags: ['quote-form', 'website-lead'],
+                    };
+                    const r = await sendLeadToCRM(leadData);
+                    if (r.success && r.contactId) {
+                        await createOpportunity(r.contactId, name, service, 'Website Quote Form');
+                    }
+                } catch (e) { logger.error('GHL background sync error', e); }
             })();
         }
 
         // ═══════════════════════════════════════════════════════
-        // STEP 3: Calendar booking (still needs GHL contactId)
+        // STEP 3: Calendar booking (uses CRM calendar, not GHL)
         // ═══════════════════════════════════════════════════════
         let bookingResult = null;
-        if (contactId && date && time) {
+        if (date && time) {
             try {
                 bookingResult = await bookAppointment({
-                    contactId,
+                    contactId: crmContactId || null,
                     startTime: time,
                     service: service || 'Handyman Service',
                     address: address || (zip ? `ZIP: ${zip}` : ''),
