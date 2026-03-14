@@ -354,6 +354,25 @@ async function handleQuoteSubmission(req, res) {
 
         const contactId = crmResult.contactId;
 
+        // --- Forward to new CRM (fire-and-forget) ---
+        const newCrmUrl = process.env.NEW_CRM_WEBHOOK_URL || 'https://crm.asap.repair/api/webhooks/website';
+        const newCrmSecret = process.env.NEW_CRM_WEBHOOK_SECRET;
+        if (newCrmSecret) {
+            fetch(newCrmUrl, {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'X-Webhook-Secret': newCrmSecret,
+                },
+                body: JSON.stringify({ name, phone, email, zip, service, date, message, address }),
+            }).then(r => {
+                if (r.ok) logger.info('Lead forwarded to new CRM', { name, phone });
+                else logger.error('New CRM webhook failed', { status: r.status });
+            }).catch(err => {
+                logger.error('New CRM webhook error', { error: err.message });
+            });
+        }
+
         // --- Step 2: Upload photos to conversation (if any) ---
         let photoUrls = [];
 
