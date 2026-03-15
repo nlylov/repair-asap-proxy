@@ -1,6 +1,7 @@
 const express = require('express');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { getAvailableSlots, bookAppointment } = require('../lib/calendarService');
+const { sendToTelegram } = require('../lib/telegram');
 
 const router = express.Router();
 
@@ -93,24 +94,12 @@ router.post('/webhook', async (req, res) => {
 
             logger.info('Call ended', { customerNumber, summary });
 
-            // Send notification to Telegram
-            const token = process.env.TELEGRAM_BOT_TOKEN;
-            const chatId = process.env.TELEGRAM_ADMIN_ID;
-            if (token && chatId) {
-                let safeTranscript = transcript ? transcript.substring(0, 3800) : 'No transcript';
-                if (transcript.length > 3800) safeTranscript += '... [Truncated due to Telegram limits]';
+            // Send notification to Telegram → Leads group (calls need immediate attention)
+            let safeTranscript = transcript ? transcript.substring(0, 3800) : 'No transcript';
+            if (transcript.length > 3800) safeTranscript += '... [Truncated due to Telegram limits]';
 
-                const tgMessage = `📞 <b>Vapi AI Call Ended</b>\nPhone: ${customerNumber || 'Unknown'}\n\n<b>Summary:</b>\n${summary || 'No summary'}\n\n<b>Recording:</b>\n${recordingUrl || 'No recording'}\n\n<b>Transcript:</b>\n${safeTranscript}`;
-                try {
-                    await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ chat_id: chatId, text: tgMessage, parse_mode: 'HTML' })
-                    });
-                } catch (e) {
-                    logger.error('Telegram push failed', e);
-                }
-            }
+            const tgMessage = `📞 <b>Vapi AI Call Ended</b>\nPhone: ${customerNumber || 'Unknown'}\n\n<b>Summary:</b>\n${summary || 'No summary'}\n\n<b>Recording:</b>\n${recordingUrl || 'No recording'}\n\n<b>Transcript:</b>\n${safeTranscript}`;
+            await sendToTelegram(tgMessage, 'leads');
 
             // Push a generic note to GHL CRM here, creating the contact if they don't exist
             if (customerNumber) {

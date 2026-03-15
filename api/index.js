@@ -13,6 +13,7 @@ const { sendLeadToCRM } = require('../lib/crmService');
 const { getAvailableSlots, bookAppointment } = require('../lib/calendarService');
 const { logInfo, logError, logger } = require('../lib/utils/log');
 const { normalizePhone } = require('../lib/utils/phone');
+const { sendToTelegram, sendPhotoToTelegram, getTelegramChatId } = require('../lib/telegram');
 const { uploadFileToConversation, findConversation, sendLiveChatMessage, createOpportunity } = require('./quote');
 
 const app = express();
@@ -57,47 +58,6 @@ function getCachedPhoto(threadId) {
     if (entry && entry.expires > Date.now()) return entry.photo;
     photoCache.delete(threadId);
     return null;
-}
-
-// --- Telegram Text Notification ---
-async function sendToTelegram(text) {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_ADMIN_ID;
-    if (!token || !chatId) return;
-    try {
-        await fetch(`https://api.telegram.org/bot${token}/sendMessage`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ chat_id: chatId, text, parse_mode: 'HTML' })
-        });
-    } catch (error) {
-        console.error('Telegram Error:', error);
-    }
-}
-
-// --- Telegram Photo Forwarding ---
-async function sendPhotoToTelegram(base64Data, caption = '') {
-    const token = process.env.TELEGRAM_BOT_TOKEN;
-    const chatId = process.env.TELEGRAM_ADMIN_ID;
-    if (!token || !chatId || !base64Data) return;
-    try {
-        const buffer = Buffer.from(base64Data, 'base64');
-        const boundary = '----FormBoundary' + Date.now();
-        const parts = [];
-        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="chat_id"\r\n\r\n${chatId}`);
-        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="caption"\r\n\r\n${caption}`);
-        parts.push(`--${boundary}\r\nContent-Disposition: form-data; name="photo"; filename="chat-photo.jpg"\r\nContent-Type: image/jpeg\r\n\r\n`);
-        const header = parts.join('\r\n');
-        const footer = `\r\n--${boundary}--\r\n`;
-        const bodyBuffer = Buffer.concat([Buffer.from(header), buffer, Buffer.from(footer)]);
-        await fetch(`https://api.telegram.org/bot${token}/sendPhoto`, {
-            method: 'POST',
-            headers: { 'Content-Type': `multipart/form-data; boundary=${boundary}` },
-            body: bodyBuffer
-        });
-    } catch (error) {
-        console.error('Telegram Photo Error:', error);
-    }
 }
 
 // --- Build Additional Instructions ---
@@ -213,7 +173,7 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
     while (['queued', 'in_progress', 'requires_action'].includes(runStatus.status)) {
         if (Date.now() - startTime > 50000) {
             try { await openai.beta.threads.runs.cancel(threadId, run.id); } catch (e) { }
-            await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`);
+            await sendToTelegram(`⚠️ <b>Error:</b> Timeout waiting for AI response.`, 'leads');
             return res.status(504).json({ error: 'Timeout' });
         }
 
@@ -230,7 +190,7 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
 
                         // Enhanced Telegram notification
                         const hasPhoto = !!photoData;
-                        await sendToTelegram(formatLeadTelegram(args, source, pageContext, hasPhoto));
+                        await sendToTelegram(formatLeadTelegram(args, source, pageContext, hasPhoto), 'leads');
 
                         const leadData = {
                             reqId: req.id,
@@ -256,7 +216,7 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                         const crmLog = crmResult.success ? '✅ CRM' : `❌ CRM: ${crmResult.error}`;
                         const sheetResult = await appendLeadToSheet(req, leadData);
                         const sheetLog = sheetResult.success ? '✅ Sheet' : `❌ Sheet: ${sheetResult.error}`;
-                        await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`);
+                        await sendToTelegram(`Status: ${crmLog} | ${sheetLog}`, 'activity');
 
                         // Create Opportunity + Conversation in GHL (same as quote form)
                         const contactId = crmResult.contactId;
@@ -319,7 +279,7 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                     try {
                         const args = JSON.parse(toolCall.function.arguments);
                         const result = await getAvailableSlots(args.date, 1);
-                        await sendToTelegram(`📅 <b>Checking availability:</b> ${args.date} → ${result.slots.length} slots available`);
+                        await sendToTelegram(`📅 <b>Checking availability:</b> ${args.date} → ${result.slots.length} slots available`, 'activity');
                         toolOutputs.push({
                             tool_call_id: toolCall.id,
                             output: JSON.stringify({
@@ -351,9 +311,9 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                         });
 
                         if (result.success) {
-                            await sendToTelegram(`📅 <b>APPOINTMENT BOOKED!</b>\n👤 ${args.contactName}\n📅 ${args.date} at ${args.time}\n🔧 ${args.service}\n📍 ${args.address || 'TBD'}`);
+                            await sendToTelegram(`📅 <b>APPOINTMENT BOOKED!</b>\n👤 ${args.contactName}\n📅 ${args.date} at ${args.time}\n🔧 ${args.service}\n📍 ${args.address || 'TBD'}`, 'leads');
                         } else {
-                            await sendToTelegram(`⚠️ Booking failed: ${result.error}`);
+                            await sendToTelegram(`⚠️ Booking failed: ${result.error}`, 'leads');
                         }
 
                         toolOutputs.push({
@@ -399,11 +359,11 @@ async function processAssistantRun(req, res, threadId, run, { source, pageContex
                 lowerText.includes('submitted') || lowerText.includes('recorded');
 
             if (botClaimsSave && !toolCalled) {
-                await sendToTelegram(`⚠️ <b>WARNING:</b> Bot claimed save but did NOT call tool.`);
+                await sendToTelegram(`⚠️ <b>WARNING:</b> Bot claimed save but did NOT call tool.`, 'leads');
             }
 
             const emoji = photoData ? '🤖📸' : '🤖';
-            await sendToTelegram(`${emoji} <b>Bot:</b> ${text.substring(0, 500)}`);
+            await sendToTelegram(`${emoji} <b>Bot:</b> ${text.substring(0, 500)}`, 'activity');
 
             return res.json({ message: text });
         }
@@ -419,7 +379,7 @@ app.post('/api/thread', async (req, res) => {
     if (!openai) return res.status(500).json({ error: 'OpenAI not initialized' });
     try {
         const thread = await openai.beta.threads.create();
-        await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`);
+        await sendToTelegram(`🆕 <b>New Chat Started!</b>\nThread ID: <code>${thread.id}</code>`, 'activity');
         res.json({ threadId: thread.id });
     } catch (error) {
         res.status(500).json({ error: 'Failed to create thread' });
@@ -434,7 +394,7 @@ app.post('/api/message', async (req, res) => {
         const { threadId, message, pageContext } = req.body;
         if (!threadId || !message) return res.status(400).json({ error: 'Missing data' });
 
-        await sendToTelegram(`👤 <b>User:</b> ${message.substring(0, 500)}`);
+        await sendToTelegram(`👤 <b>User:</b> ${message.substring(0, 500)}`, 'activity');
 
         await openai.beta.threads.messages.create(threadId, { role: 'user', content: message });
 
@@ -469,8 +429,8 @@ app.post('/api/chat-photo', async (req, res) => {
         }
 
         // Forward photo to Telegram immediately
-        await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`);
-        await sendPhotoToTelegram(photo.data, `📸 Chat photo from thread ${threadId}`);
+        await sendToTelegram(`📸 <b>Photo received in chat!</b>\nThread: <code>${threadId}</code>`, 'leads');
+        await sendPhotoToTelegram(photo.data, `📸 Chat photo from thread ${threadId}`, 'leads');
 
         // Cache photo for later use when saveLeadToSheet fires
         cachePhoto(threadId, photo);
@@ -754,5 +714,7 @@ app.get('/api/health', (req, res) => res.json({
 // Export app and useful utility functions for other modules (like vapi.js)
 module.exports = {
     app,
-    sendToTelegram
+    sendToTelegram,
+    sendPhotoToTelegram,
+    getTelegramChatId
 };
