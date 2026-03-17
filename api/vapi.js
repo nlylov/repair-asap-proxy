@@ -248,6 +248,8 @@ router.post('/webhook', async (req, res) => {
 
                         // Call the CRM transfer endpoint
                         const crmBaseUrl = process.env.CRM_BASE_URL || 'https://repair-asap-crm-production.up.railway.app';
+                        logger.info('Transfer step 1: calling CRM', { crmBaseUrl, url: `${crmBaseUrl}/api/twilio/voice/transfer` });
+                        
                         const transferResponse = await fetch(`${crmBaseUrl}/api/twilio/voice/transfer`, {
                             method: 'POST',
                             headers: { 'Content-Type': 'application/json' },
@@ -260,7 +262,9 @@ router.post('/webhook', async (req, res) => {
                             }),
                         });
 
+                        logger.info('Transfer step 2: CRM responded', { status: transferResponse.status });
                         const transferData = await transferResponse.json();
+                        logger.info('Transfer step 3: CRM data', transferData);
 
                         if (transferResponse.ok && transferData.success) {
                             logger.info('Transfer initiated successfully', transferData);
@@ -272,14 +276,19 @@ router.post('/webhook', async (req, res) => {
                                 result: `Successfully connecting the caller to ${transferData.target}. The call is being transferred now.`
                             });
                         } else {
-                            logger.error('Transfer failed', transferData);
+                            logger.error('Transfer failed', { status: transferResponse.status, data: transferData });
                             results.push({
                                 toolCallId: toolCall.id,
                                 result: `I was unable to transfer the call right now. Please let the customer know that ${target === 'nikita' ? 'Nikita' : 'our team'} will call them back shortly.`
                             });
                         }
                     } catch (e) {
-                        logger.error('Transfer exception', e);
+                        logger.error('Transfer exception DETAIL', { 
+                            message: e?.message || String(e), 
+                            name: e?.name || 'unknown',
+                            stack: e?.stack || 'no stack',
+                            code: e?.code || 'no code'
+                        });
                         results.push({
                             toolCallId: toolCall.id,
                             result: 'Sorry, there was a technical error with the transfer. Please take the customer\'s number.'
