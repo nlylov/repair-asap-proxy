@@ -198,7 +198,180 @@ router.post('/webhook', async (req, res) => {
             return res.json({ success: true });
         }
 
-        // 3. Other Events - Acknowledge safely
+        // 3. Tool Calls - Handle transferToHuman and other function calls
+        if (type === 'tool-calls') {
+            const toolCalls = payload.message?.toolCalls || payload.message?.toolCallList || [];
+            logger.info('Tool calls received', { count: toolCalls.length, tools: toolCalls.map(t => t?.function?.name || t?.name || 'unknown') });
+
+            const results = [];
+
+            for (const toolCall of toolCalls) {
+                const functionName = toolCall?.function?.name || toolCall?.name || '';
+                logger.info(`Processing tool call: ${functionName}`, { toolCallId: toolCall.id });
+
+                if (functionName === 'transferToHuman') {
+                    try {
+                        let args = {};
+                        try {
+                            args = typeof toolCall.function.arguments === 'string'
+                                ? JSON.parse(toolCall.function.arguments)
+                                : (toolCall.function.arguments || {});
+                        } catch (e) {
+                            logger.error('Failed to parse transfer arguments', e);
+                        }
+
+                        const target = args.target || 'default';
+                        const summary = args.summary || 'General inquiry';
+
+                        // Extract the Twilio call SID from VAPI's call context
+                        const callSid = payload.message?.call?.phoneCallProviderId
+                            || payload.message?.call?.transport?.callSid
+                            || payload.message?.call?.id;
+
+                        // Get caller info
+                        const callerPhone = payload.message?.call?.customer?.number || '';
+                        const callerName = args.callerName
+                            || payload.message?.call?.customer?.name
+                            || (payload.message?.call?.assistantOverrides?.variableValues?.name)
+                            || 'Unknown';
+
+                        if (!callSid) {
+                            logger.error('No call SID available for transfer');
+                            results.push({
+                                toolCallId: toolCall.id,
+                                result: 'Sorry, I was unable to transfer the call due to a technical issue. Please ask the customer to call back or take their number.'
+                            });
+                            continue;
+                        }
+
+                        logger.info('Initiating warm transfer from webhook', { callSid, target, callerName, summary });
+
+                        // Call the CRM transfer endpoint
+                        const crmBaseUrl = process.env.CRM_BASE_URL || 'https://repair-asap-crm-production.up.railway.app';
+                        const transferResponse = await fetch(`${crmBaseUrl}/api/twilio/voice/transfer`, {
+                            method: 'POST',
+                            headers: { 'Content-Type': 'application/json' },
+                            body: JSON.stringify({
+                                callSid,
+                                target,
+                                callerName,
+                                callerPhone,
+                                summary,
+                            }),
+                        });
+
+                        const transferData = await transferResponse.json();
+
+                        if (transferResponse.ok && transferData.success) {
+                            logger.info('Transfer initiated successfully', transferData);
+                            const tgMsg = `📞➡️ <b>Call Transfer</b>\nCaller: ${callerName} (${callerPhone})\nTransferred to: ${transferData.target}\nReason: ${summary}`;
+                            await sendToTelegram(tgMsg, 'leads');
+
+                            results.push({
+                                toolCallId: toolCall.id,
+                                result: `Successfully connecting the caller to ${transferData.target}. The call is being transferred now.`
+                            });
+                        } else {
+                            logger.error('Transfer failed', transferData);
+                            results.push({
+                                toolCallId: toolCall.id,
+                                result: `I was unable to transfer the call right now. Please let the customer know that ${target === 'nikita' ? 'Nikita' : 'our team'} will call them back shortly.`
+                            });
+                        }
+                    } catch (e) {
+                        logger.error('Transfer exception', e);
+                        results.push({
+                            toolCallId: toolCall.id,
+                            result: 'Sorry, there was a technical error with the transfer. Please take the customer\'s number.'
+                        });
+                    }
+                }
+                // Handle checkAvailability tool calls
+                else if (functionName === 'checkAvailability') {
+                    try {
+                        let args = {};
+                        try {
+                            args = typeof toolCall.function.arguments === 'string'
+                                ? JSON.parse(toolCall.function.arguments)
+                                : (toolCall.function.arguments || {});
+                        } catch (e) { }
+
+                        const dateInput = args.date || args.day || '';
+                        const parsedDate = parseNaturalDate(dateInput) || dateInput;
+                        const result = await getAvailableSlots(parsedDate, args.numberOfDays || 1);
+                        results.push({
+                            toolCallId: toolCall.id,
+                            result: JSON.stringify({
+                                date: parsedDate,
+                                available_slots: result.slots,
+                                total: result.slots.length,
+                            })
+                        });
+                    } catch (e) {
+                        results.push({
+                            toolCallId: toolCall.id,
+                            result: JSON.stringify({ error: e.message, available_slots: [] })
+                        });
+                    }
+                }
+                // Handle bookAppointment tool calls
+                else if (functionName === 'bookAppointment') {
+                    try {
+                        let args = {};
+                        try {
+                            args = typeof toolCall.function.arguments === 'string'
+                                ? JSON.parse(toolCall.function.arguments)
+                                : (toolCall.function.arguments || {});
+                        } catch (e) { }
+
+                        const startTime = `${args.date}T${args.time || '10:00'}:00-05:00`;
+                        const callerPhone = payload.message?.call?.customer?.number || '';
+
+                        // Look up contact to get contactId
+                        let contactId = args.contactId;
+                        if (!contactId && callerPhone) {
+                            const contact = await lookupContactByPhone(callerPhone);
+                            contactId = contact?.id;
+                        }
+
+                        const result = await bookAppointment({
+                            contactId,
+                            startTime,
+                            service: args.service || 'Handyman Service',
+                            address: args.address || '',
+                            contactName: args.name || args.contactName || 'Customer',
+                        });
+
+                        if (result.success) {
+                            const tgMsg = `📅 <b>BOOKED via Voice AI!</b>\n👤 ${args.name || 'Customer'}\n📅 ${args.date} at ${args.time}\n🔧 ${args.service || 'Handyman'}\n📍 ${args.address || 'TBD'}`;
+                            await sendToTelegram(tgMsg, 'leads');
+                        }
+
+                        results.push({
+                            toolCallId: toolCall.id,
+                            result: JSON.stringify(result)
+                        });
+                    } catch (e) {
+                        results.push({
+                            toolCallId: toolCall.id,
+                            result: JSON.stringify({ success: false, error: e.message })
+                        });
+                    }
+                }
+                // Unknown tool - acknowledge
+                else {
+                    logger.warn(`Unknown tool call: ${functionName}`);
+                    results.push({
+                        toolCallId: toolCall.id,
+                        result: 'Tool not recognized.'
+                    });
+                }
+            }
+
+            return res.json({ results });
+        }
+
+        // 4. Other Events - Acknowledge safely
         return res.json({ success: true });
 
     } catch (e) {
