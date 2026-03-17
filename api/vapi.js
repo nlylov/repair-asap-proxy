@@ -506,4 +506,101 @@ router.post('/outbound', async (req, res) => {
     }
 });
 
+/**
+ * POST /api/vapi/transfer
+ * Custom tool called by VAPI when Anna decides to transfer a call to a human.
+ * Extracts the Twilio call SID and forwards to the CRM transfer endpoint.
+ */
+router.post('/transfer', async (req, res) => {
+    logInfo(req, '/api/vapi/transfer', 'Transfer Request', { body: req.body });
+    try {
+        const { message } = req.body;
+        const toolCall = message?.toolCalls?.[0];
+        if (!toolCall) return res.json({ error: 'No tool call provided' });
+
+        let args = {};
+        try {
+            args = typeof toolCall.function.arguments === 'string'
+                ? JSON.parse(toolCall.function.arguments)
+                : (toolCall.function.arguments || {});
+        } catch (e) {
+            logger.error('Failed to parse transfer tool arguments', e);
+        }
+
+        const target = args.target || 'default';
+        const summary = args.summary || 'General inquiry';
+
+        // Extract the Twilio call SID from VAPI's call context
+        const callSid = message?.call?.phoneCallProviderId
+            || message?.call?.transport?.callSid
+            || message?.call?.id;
+
+        // Get caller info
+        const callerPhone = message?.call?.customer?.number || '';
+        const callerName = args.callerName
+            || message?.call?.customer?.name
+            || (message?.call?.assistantOverrides?.variableValues?.name)
+            || 'Unknown';
+
+        if (!callSid) {
+            logger.error('No call SID available for transfer');
+            return res.json({
+                results: [{
+                    toolCallId: toolCall.id,
+                    result: 'Sorry, I was unable to transfer the call due to a technical issue. Please ask the customer to call back or take their number and we will call them.'
+                }]
+            });
+        }
+
+        logger.info('Initiating warm transfer', { callSid, target, callerName, summary });
+
+        // Call the CRM transfer endpoint
+        const crmBaseUrl = process.env.CRM_BASE_URL || 'https://repair-asap-crm-production.up.railway.app';
+        const transferResponse = await fetch(`${crmBaseUrl}/api/twilio/voice/transfer`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                callSid,
+                target,
+                callerName,
+                callerPhone,
+                summary,
+            }),
+        });
+
+        const transferData = await transferResponse.json();
+
+        if (transferResponse.ok && transferData.success) {
+            logger.info('Transfer initiated successfully', transferData);
+            // Send Telegram notification about transfer
+            const tgMsg = `📞➡️ <b>Call Transfer</b>\nCaller: ${callerName} (${callerPhone})\nTransferred to: ${transferData.target}\nReason: ${summary}`;
+            await sendToTelegram(tgMsg, 'leads');
+
+            return res.json({
+                results: [{
+                    toolCallId: toolCall.id,
+                    result: `Successfully connecting the caller to ${transferData.target}. The call is being transferred now.`
+                }]
+            });
+        } else {
+            logger.error('Transfer failed', transferData);
+            return res.json({
+                results: [{
+                    toolCallId: toolCall.id,
+                    result: `I was unable to transfer the call right now. Please let the customer know that ${target === 'nikita' ? 'Nikita' : 'Ayrat'} will call them back shortly.`
+                }]
+            });
+        }
+
+    } catch (e) {
+        logError(req, '/api/vapi/transfer', 'Transfer failed', e);
+        return res.json({
+            results: [{
+                toolCallId: req.body?.message?.toolCalls?.[0]?.id || 'unknown',
+                result: 'Sorry, the transfer failed due to a technical error. Please take the customer\'s number and someone will call them back.'
+            }]
+        });
+    }
+});
+
 module.exports = router;
