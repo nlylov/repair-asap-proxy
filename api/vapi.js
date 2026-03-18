@@ -248,7 +248,8 @@ router.post('/webhook', async (req, res) => {
 
                         // Call the CRM transfer endpoint
                         const crmBaseUrl = process.env.CRM_BASE_URL || 'https://repair-asap-crm-production.up.railway.app';
-                        logger.info('Transfer step 1: calling CRM', { crmBaseUrl, url: `${crmBaseUrl}/api/twilio/voice/transfer` });
+                        console.log(`[TRANSFER] Step 1: calling CRM at ${crmBaseUrl}/api/twilio/voice/transfer`);
+                        console.log(`[TRANSFER] Payload:`, JSON.stringify({ callSid, target, callerName, callerPhone, summary }));
                         
                         const transferResponse = await fetch(`${crmBaseUrl}/api/twilio/voice/transfer`, {
                             method: 'POST',
@@ -262,12 +263,26 @@ router.post('/webhook', async (req, res) => {
                             }),
                         });
 
-                        logger.info('Transfer step 2: CRM responded', { status: transferResponse.status });
-                        const transferData = await transferResponse.json();
-                        logger.info('Transfer step 3: CRM data', transferData);
+                        console.log(`[TRANSFER] Step 2: CRM responded with status ${transferResponse.status}`);
+                        
+                        // Safe JSON parsing - read as text first
+                        const responseText = await transferResponse.text();
+                        console.log(`[TRANSFER] Step 3: CRM body (first 500 chars): ${responseText.substring(0, 500)}`);
+                        
+                        let transferData;
+                        try {
+                            transferData = JSON.parse(responseText);
+                        } catch (parseErr) {
+                            console.error(`[TRANSFER] CRM returned non-JSON: ${responseText.substring(0, 200)}`);
+                            results.push({
+                                toolCallId: toolCall.id,
+                                result: `I was unable to transfer the call right now. Please let the customer know that ${target === 'nikita' ? 'Nikita' : 'our team'} will call them back shortly.`
+                            });
+                            continue;
+                        }
 
                         if (transferResponse.ok && transferData.success) {
-                            logger.info('Transfer initiated successfully', transferData);
+                            console.log(`[TRANSFER] SUCCESS: transferred to ${transferData.target}`);
                             const tgMsg = `📞➡️ <b>Call Transfer</b>\nCaller: ${callerName} (${callerPhone})\nTransferred to: ${transferData.target}\nReason: ${summary}`;
                             await sendToTelegram(tgMsg, 'leads');
 
@@ -276,19 +291,15 @@ router.post('/webhook', async (req, res) => {
                                 result: `Successfully connecting the caller to ${transferData.target}. The call is being transferred now.`
                             });
                         } else {
-                            logger.error('Transfer failed', { status: transferResponse.status, data: transferData });
+                            console.error(`[TRANSFER] FAILED: status=${transferResponse.status} data=${JSON.stringify(transferData)}`);
                             results.push({
                                 toolCallId: toolCall.id,
                                 result: `I was unable to transfer the call right now. Please let the customer know that ${target === 'nikita' ? 'Nikita' : 'our team'} will call them back shortly.`
                             });
                         }
                     } catch (e) {
-                        logger.error('Transfer exception DETAIL', { 
-                            message: e?.message || String(e), 
-                            name: e?.name || 'unknown',
-                            stack: e?.stack || 'no stack',
-                            code: e?.code || 'no code'
-                        });
+                        console.error(`[TRANSFER] EXCEPTION: ${e.name}: ${e.message}`);
+                        console.error(`[TRANSFER] STACK: ${e.stack}`);
                         results.push({
                             toolCallId: toolCall.id,
                             result: 'Sorry, there was a technical error with the transfer. Please take the customer\'s number.'
